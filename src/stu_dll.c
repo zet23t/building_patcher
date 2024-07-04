@@ -14,6 +14,7 @@
 #include "shared/editor/editor_styles.c"
 #include "shared/editor/editor.c"
 #include "shared/util/arena.c"
+#include "shared/util/graphics.c"
 
 #define COMPONENT_IMPLEMENTATION
 #include "game/component_list.h"
