@@ -258,6 +258,33 @@ static int OpenEdgeMesh_mapCornerBitSet(uint8_t cornerBits, int offsetX, int off
     return result;
 }
 
+static int NormalToBitFlag(Vector3 dir)
+{
+    float ax = fabsf(dir.x);
+    float ay = fabsf(dir.y);
+    float az = fabsf(dir.z);
+    if (ax > ay && ax > az)
+    {
+        return dir.x > 0 ? 1 : 2;
+    }
+    if (ay > ax && ay > az)
+    {
+        return dir.y > 0 ? 4 : 8;
+    }
+    return dir.z > 0 ? 16 : 32;
+}
+
+static int HighestBitOf(int bits)
+{
+    int result = 0;
+    while (bits > 0)
+    {
+        bits >>= 1;
+        result++;
+    }
+    return result;
+}
+
 static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int offsetX, int offsetY, int offsetZ)
 {
     int matchCount = 0;
@@ -266,6 +293,50 @@ static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int of
     // OpenEdgeMesh_drawCornerBitset(mesh->cubeCornerSet, (Vector3){0, 0, 0}, 0.1f, RED);
     // OpenEdgeMesh_drawCornerBitset(other->cubeCornerSet, (Vector3){offsetX, offsetY, offsetZ}, 0.075f, BLUE);
     // OpenEdgeMesh_drawCornerBitset(cornersToMatchMask, (Vector3){0, 0, 0}, 0.125f, YELLOW);
+
+
+    // check if corner normals are opposing
+    for (int i=0;i<8;i++)
+    {
+        Vector3 corner = _cubeCorners[i];
+        Vector3 normalA[8];
+        Vector3 normalB[8];
+        int normalACount = 0;
+        int normalBCount = 0;
+        // find normal of corner; if there are multiple normals, the edge is a valid match in any case
+        for (int j = 0; j < mesh->openEdgeCount; j++)
+        {
+            MeshEdge edge = mesh->openEdgeList[j];
+
+            if (Vector3DistanceSqr(edge.p1, corner) < 0.001f || Vector3DistanceSqr(edge.p2, corner) < 0.001f)
+            {
+                normalA[normalACount++] = edge.triangleNormal;
+            }
+        }
+
+        for (int j = 0; j < other->openEdgeCount; j++)
+        {
+            MeshEdge edge = other->openEdgeList[j];
+
+            if (Vector3DistanceSqr(Vector3Add(edge.p1, (Vector3){offsetX, offsetY, offsetZ}), corner) < 0.001f || Vector3DistanceSqr(Vector3Add(edge.p2, (Vector3){offsetX, offsetY, offsetZ}), corner) < 0.001f)
+            {
+                normalB[normalBCount++] = edge.triangleNormal;
+            }
+        }
+
+        for (int j = 0; j < normalACount; j++)
+        {
+            for (int k = 0; k < normalBCount; k++)
+            {
+                if (Vector3DotProduct(normalA[j], normalB[k]) < -0.5f)
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    
+    
 
     for (int i = 0; i < mesh->openEdgeCount; i++)
     {
@@ -647,7 +718,7 @@ static void OpenEdgeMesh_drawDebug(Camera camera, OpenEdgeMesh *openEdgeMesh)
     }
 }
 
-static void TestMeshes(Vector3 position, OpenEdgeMesh *meshA, OpenEdgeMesh *meshB, int offsetX, int offsetY, int offsetZ)
+static void TestMeshes(Vector3 position, OpenEdgeMesh *meshA, OpenEdgeMesh *meshB, int offsetX, int offsetY, int offsetZ, int outlines)
 {
     rlPushMatrix();
     rlTranslatef(position.x, position.y, position.z);
@@ -676,9 +747,12 @@ static void TestMeshes(Vector3 position, OpenEdgeMesh *meshA, OpenEdgeMesh *mesh
     rlPushMatrix();
     OpenEdgeMesh_isMatch(meshA, meshB, offsetX, offsetY, offsetZ);
 
-    // OpenEdgeMesh_drawDebug(camera, meshA);
-    // rlTranslatef(offsetX, offsetY, offsetZ);
-    // OpenEdgeMesh_drawDebug(camera, meshB);
+    if (outlines)
+    {
+        OpenEdgeMesh_drawDebug(_camera, meshA);
+        rlTranslatef(offsetX, offsetY, offsetZ);
+        OpenEdgeMesh_drawDebug(_camera, meshB);
+    }
     
     rlPopMatrix();
     rlDrawRenderBatchActive();
@@ -716,91 +790,117 @@ void PiecePatcherDrawDebug()
     mat.maps[MATERIAL_MAP_DIFFUSE].color = (Color){255, 255, 255, 255};
     _camera = camera;
 
-    static int testIndex = 0;
-    static int ox = 0, oy = -1, oz = 0;
-    int debug = 0;
-    if (IsKeyPressed(KEY_ONE))
+    static int mode = 0;
+    static int outlines = 0;
+    if (IsKeyPressed(KEY_O))
     {
-        ox = 0;
-        oy = 1;
-        oz = 0;
-        debug = 1;
+        outlines = (outlines + 1) % 2;
     }
-    if (IsKeyPressed(KEY_TWO))
+    if (IsKeyPressed(KEY_M))
     {
-        ox = 0;
-        oy = 0;
-        oz = 1;
-        debug = 1;
+        mode = (mode + 1) % 2;
     }
-    if (IsKeyPressed(KEY_THREE))
+    if (mode == 0)
     {
-        ox = 1;
-        oy = 0;
-        oz = 0;
-        debug = 1;
-    }
-    if (IsKeyPressed(KEY_FOUR))
-    {
-        ox = 0;
-        oy = -1;
-        oz = 0;
-        debug = 1;
-    }
-    if (IsKeyPressed(KEY_FIVE))
-    {
-        ox = 0;
-        oy = 0;
-        oz = 0;
-        debug = 1;
-    }
 
-    if (IsKeyPressed(KEY_LEFT))
-    {
-        testIndex = (testIndex - 4 + _openEdgeMeshCount) % _openEdgeMeshCount;
-        debug = 1;
-    }
-    if (IsKeyPressed(KEY_RIGHT))
-    {
-        testIndex = (testIndex + 4) % _openEdgeMeshCount;
-        debug = 1;
-    }
-
-
-    OpenEdgeMesh *meshA = &_openEdgeMeshes[testIndex];
-    if (debug) printf("Testing %s (%d)\n", meshA->mesh->name, testIndex);
-    int x = 0, z = 0;
-    for (int i = 0; i < _openEdgeMeshCount; i++)
-    {
-        OpenEdgeMesh *meshB = &_openEdgeMeshes[i];
-        if (OpenEdgeMesh_isMatch(meshA, meshB, ox, oy, oz))
+        static int testIndex = 0;
+        static int ox = 1, oy = 0, oz = 0;
+        int debug = 0;
+        if (IsKeyPressed(KEY_ONE))
         {
-            if (debug) printf("  Match %s (%d)\n", meshB->mesh->name, i);
-            TestMeshes((Vector3){x * 2.5f - 4.0f, 0.0f, z++ * 2.5f - 4.0f}, meshA, meshB, ox, oy, oz);
-            if (z == 4)
+            ox = 0;
+            oy = 1;
+            oz = 0;
+            debug = 1;
+        }
+        if (IsKeyPressed(KEY_TWO))
+        {
+            ox = 0;
+            oy = 0;
+            oz = 1;
+            debug = 1;
+        }
+        if (IsKeyPressed(KEY_THREE))
+        {
+            ox = 1;
+            oy = 0;
+            oz = 0;
+            debug = 1;
+        }
+        if (IsKeyPressed(KEY_FOUR))
+        {
+            ox = 0;
+            oy = -1;
+            oz = 0;
+            debug = 1;
+        }
+        if (IsKeyPressed(KEY_FIVE))
+        {
+            ox = 0;
+            oy = 0;
+            oz = 0;
+            debug = 1;
+        }
+
+        if (IsKeyPressed(KEY_LEFT))
+        {
+            testIndex = (testIndex - 4 + _openEdgeMeshCount) % _openEdgeMeshCount;
+            debug = 1;
+        }
+        if (IsKeyPressed(KEY_RIGHT))
+        {
+            testIndex = (testIndex + 4) % _openEdgeMeshCount;
+            debug = 1;
+        }
+
+
+        OpenEdgeMesh *meshA = &_openEdgeMeshes[testIndex];
+        if (debug) printf("Testing %s (%d) %d %d %d\n", meshA->mesh->name, testIndex, ox, oy, oz);
+        int x = 0, z = 0;
+        for (int i = 0; i < _openEdgeMeshCount; i++)
+        {
+            OpenEdgeMesh *meshB = &_openEdgeMeshes[i];
+            if (OpenEdgeMesh_isMatch(meshA, meshB, ox, oy, oz))
             {
-                z = 0;
-                x++;
+                if (debug) printf("  Match %s (%d)\n", meshB->mesh->name, i);
+                TestMeshes((Vector3){x * 2.5f - 4.0f, 0.0f, z++ * 2.5f - 4.0f}, meshA, meshB, ox, oy, oz, outlines);
+                if (z == 4)
+                {
+                    z = 0;
+                    x++;
+                }
             }
         }
     }
+    else
+    {
+        int testcases[] = {
+            68, 70, 1, 0, 0,
+            0, 0, 0, -1, 0,
+            44, 32, 0, 0, 0,
+            76, 60, 0, 1, 0,
+            0, 56, 0, 0, -1,
+            0, 3, 0, 0, 1,
+            0, 3, 0, 0, 0,
+            0, 1, 0, 0, 0,
+            59, 57, 0, 0, 0,
+            56, 55, 0, 0, 0,
+            56, 55, 0, 1, 0,
+            0, 55, 0, 1, 0,
+            24, 28, 0, 1, 0,
+            28, 60, 0, 0, 0,
+            28, 50, 0, 0, 0,
+            71, 55, 0, 1, 0,
+            55, 55, 1, 0, 0,
+            88, 96, 1, 0, 0,
+        };
 
-    // TestMeshes((Vector3){-3.0f, 0.0f, 0.0f}, &_openEdgeMeshes[0], &_openEdgeMeshes[0], 0, -1, 0);
-    // TestMeshes((Vector3){-3.0f, 0.0f, 1.5f}, &_openEdgeMeshes[44], &_openEdgeMeshes[32], 0, 0, 0);
-    // TestMeshes((Vector3){4.5f, 0.0f, 1.5f}, &_openEdgeMeshes[76], &_openEdgeMeshes[60], 0, 1, 0);
-    // TestMeshes((Vector3){4.5f, 0.0f, 1.5f}, &_openEdgeMeshes[0], &_openEdgeMeshes[56], 0, 0, -1);
-    // TestMeshes((Vector3){0.0f, 0.0f, 1.5f}, &_openEdgeMeshes[0], &_openEdgeMeshes[3], 0, 0, 1);
-    // TestMeshes((Vector3){0.0f, 0.0f, 3.0f}, &_openEdgeMeshes[0], &_openEdgeMeshes[3], 0, 0, 0);
-    // TestMeshes((Vector3){1.5f, 0.0f, 3.0f}, &_openEdgeMeshes[0], &_openEdgeMeshes[1], 0, 0, 0);
-    // TestMeshes((Vector3){1.5f, 0.0f, 0.0f}, &_openEdgeMeshes[59], &_openEdgeMeshes[57], 0, 0, 0);
-    // TestMeshes((Vector3){3.0f, 0.0f, 0.0f}, &_openEdgeMeshes[56], &_openEdgeMeshes[55], 0, 0, 0);
-    // TestMeshes((Vector3){3.0f, 0.0f, 1.5f}, &_openEdgeMeshes[56], &_openEdgeMeshes[55], 0, 1, 0);
-    // TestMeshes((Vector3){0.0f, 0.0f, 0.0f}, &_openEdgeMeshes[0], &_openEdgeMeshes[55], 0, 1, 0);
-    // TestMeshes((Vector3){-1.5f, 0.0f, 0.0f}, &_openEdgeMeshes[24], &_openEdgeMeshes[28], 0, 1, 0);
-    // TestMeshes((Vector3){-1.5f, 0.0f, -1.5f}, &_openEdgeMeshes[28], &_openEdgeMeshes[60], 0, 0, 0);
-    // TestMeshes((Vector3){-1.5f, 0.0f, -3.0f}, &_openEdgeMeshes[28], &_openEdgeMeshes[50], 0, 0, 0);
-    // TestMeshes((Vector3){1.5f, 0.0f, -3.0f}, &_openEdgeMeshes[71], &_openEdgeMeshes[55], 0, 1, 0);
-    // TestMeshes((Vector3){-3.0f, 0.0f, 0.0f}, &_openEdgeMeshes[55], &_openEdgeMeshes[55], 1, 0, 0);
+        for (int i=0;i<sizeof(testcases)/sizeof(int);i+=5)
+        {
+            int n = i / 5;
+            TestMeshes((Vector3){(n % 6) * 2.5f - 4.0f, 0.0f, (n / 6) * 2.5f - 4.0f}, &_openEdgeMeshes[testcases[i]], &_openEdgeMeshes[testcases[i+1]], testcases[i+2], testcases[i+3], testcases[i+4], outlines);
+        }
+    }
 
     // rlPushMatrix();
     // for (int i = 0; i < limit; i+=stride)
