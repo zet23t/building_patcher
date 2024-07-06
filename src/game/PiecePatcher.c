@@ -208,22 +208,78 @@ static bool MeshEdge_hasMatchingPoints(MeshEdge edge, MeshEdge other, int offset
 
 static Camera _camera;
 
+#define BYTE_TO_BINARY_PATTERN "%c%c%c%c%c%c%c%c"
+#define BYTE_TO_BINARY(byte)  \
+  ((byte) & 0x80 ? '1' : '0'), \
+  ((byte) & 0x40 ? '1' : '0'), \
+  ((byte) & 0x20 ? '1' : '0'), \
+  ((byte) & 0x10 ? '1' : '0'), \
+  ((byte) & 0x08 ? '1' : '0'), \
+  ((byte) & 0x04 ? '1' : '0'), \
+  ((byte) & 0x02 ? '1' : '0'), \
+  ((byte) & 0x01 ? '1' : '0') 
+
+void OpenEdgeMesh_drawCornerBitset(uint8_t cornerBits, Vector3 position, float size, Color color)
+{
+    for (int i = 0; i < 8; i++)
+    {
+        if (cornerBits & (1 << i))
+        {
+            DrawCubeWires(Vector3Add(position, _cubeCorners[i]), size, size, size, color);
+        }
+    }
+}
+
+static int OpenEdgeMesh_mapCornerBitSet(uint8_t cornerBits, int offsetX, int offsetY, int offsetZ)
+{
+    if (offsetX == 0 && offsetY == 0 && offsetZ == 0)
+    {
+        return cornerBits;
+    }
+
+    int result = 0;
+    for (int i = 0; i < 8; i++)
+    {
+        if (cornerBits & (1 << i))
+        {
+            Vector3 corner = Vector3Add(_cubeCorners[i], (Vector3){offsetX, offsetY, offsetZ});
+            int cornerIndex = getCornerIndex(corner);
+            if (cornerIndex == -1)
+            {
+                // TraceLog(LOG_WARNING, "Corner not found %d %d %d", (int)corner.x, (int)corner.y, (int)corner.z);
+            }
+            else
+            {
+                result |= 1 << cornerIndex;
+            }
+        }
+    }
+
+    return result;
+}
+
 static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int offsetX, int offsetY, int offsetZ)
 {
     int matchCount = 0;
+    int cornersToMatchMask = mesh->cubeCornerSet & OpenEdgeMesh_mapCornerBitSet(other->cubeCornerSet, offsetX, offsetY, offsetZ);
+    
+    // OpenEdgeMesh_drawCornerBitset(mesh->cubeCornerSet, (Vector3){0, 0, 0}, 0.1f, RED);
+    // OpenEdgeMesh_drawCornerBitset(other->cubeCornerSet, (Vector3){offsetX, offsetY, offsetZ}, 0.075f, BLUE);
+    // OpenEdgeMesh_drawCornerBitset(cornersToMatchMask, (Vector3){0, 0, 0}, 0.125f, YELLOW);
+
     for (int i = 0; i < mesh->openEdgeCount; i++)
     {
         MeshEdge edge = mesh->openEdgeList[i];
 
         if (edge.cornerBits1 == 0)
             continue;
-
         Vector3 a1 = edge.p1;
         Vector3 a2 = edge.p2;
         // GraphicsDrawArrow(_camera, a1, a2, 0.008f, WHITE);
         // DrawCubeWires(a1, 0.1f, 0.1f, 0.1f, RED);
         for (int j = 0; j < other->openEdgeCount; j++)
         {
+            int loopCornerBits = edge.cornerBits1;
             MeshEdge otherEdge = other->openEdgeList[j];
             if (otherEdge.cornerBits2 == 0)
                 continue;
@@ -238,8 +294,8 @@ static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int of
                 // We need an initial match to start looking at the edge loop
                 continue;
             }
-            DrawCubeWires(a1, 0.1f, 0.1f, 0.1f, RED);
-            DrawCubeWires(b2, 0.15f, 0.15f, 0.15f, BLUE);
+            // DrawCubeWires(a1, 0.1f, 0.1f, 0.1f, RED);
+            // DrawCubeWires(b2, 0.15f, 0.15f, 0.15f, BLUE);
             // every point of the mesh edge loop must lie on the other edge loop until
             // it reaches a corner point
             int k = j;
@@ -269,10 +325,14 @@ static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int of
                     {
                         return false;
                     }
+                    // loopCornerBits |= OpenEdgeMesh_mapCornerBitSet(other->openEdgeList[k].cornerBits2, offsetX, offsetY, offsetZ);
                 }
-                GraphicsDrawArrow(_camera, edgeA.p1, edgeA.p2, 0.01f, BLUE);
+                // GraphicsDrawArrow(_camera, edgeA.p1, edgeA.p2, 0.01f, BLUE);
                 if (edgeA.cornerBits2 != 0)
+                {
+                    loopCornerBits |= edgeA.cornerBits2;
                     break;
+                }
             }
             int l = i;
             for (int o = 0; o < other->openEdgeCount;o++)
@@ -284,7 +344,7 @@ static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int of
                 )
                 {
                     bool valid = false;
-                    DrawCubeWires(Vector3Add(edgeB.p1, (Vector3){offsetX, offsetY, offsetZ}), 0.1f, 0.1f, 0.1f, BLUE);
+                    // DrawCubeWires(Vector3Add(edgeB.p1, (Vector3){offsetX, offsetY, offsetZ}), 0.1f, 0.1f, 0.1f, BLUE);
                     do {
                         l = (l - 1 + mesh->openEdgeCount) % mesh->openEdgeCount;
                         if (MeshEdge_hasMatchingPoints(mesh->openEdgeList[l], edgeB, offsetX, offsetY, offsetZ, 0))
@@ -297,23 +357,29 @@ static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int of
                     {
                         return false;
                     }
-                }
-                else
-                {
-                    DrawCubeWires(Vector3Add(edgeB.p1, (Vector3){offsetX, offsetY, offsetZ}), 0.1f, 0.1f, 0.1f, GREEN);
+                    // loopCornerBits |= mesh->openEdgeList[l].cornerBits2;
                 }
 
-                GraphicsDrawArrow(_camera, 
-                    Vector3Add(edgeB.p1, (Vector3){offsetX, offsetY, offsetZ}),
-                    Vector3Add(edgeB.p2, (Vector3){offsetX, offsetY, offsetZ}),
-                    0.01f, GREEN);
+
+                // GraphicsDrawArrow(_camera, 
+                //     Vector3Add(edgeB.p1, (Vector3){offsetX, offsetY, offsetZ}),
+                //     Vector3Add(edgeB.p2, (Vector3){offsetX, offsetY, offsetZ}),
+                //     0.01f, GREEN);
                 if (edgeB.cornerBits1 != 0)
+                {
+                    loopCornerBits |= OpenEdgeMesh_mapCornerBitSet(edgeB.cornerBits1, offsetX, offsetY, offsetZ);
                     break;
+                }
             }
+            
+            // OpenEdgeMesh_drawCornerBitset(loopCornerBits, (Vector3){offsetX, offsetY, offsetZ}, 0.125f, YELLOW);
+            cornersToMatchMask &= ~loopCornerBits;
             matchCount++;
         }
     }
-    return matchCount > 0;
+    
+    
+    return matchCount > 0 && cornersToMatchMask == 0;
 }
 
 static Model _buildingPieces;
@@ -637,7 +703,7 @@ void PiecePatcherDrawDebug()
     Camera camera = (Camera){
         .far = 1000.0f,
         .near = 0.1f,
-        .fovy = 8.0f,
+        .fovy = 16.0f,
         .position = camPos,
         .target = camTarget,
         .up = (Vector3){0.0f, 1.0f, 0.0f},
@@ -651,7 +717,44 @@ void PiecePatcherDrawDebug()
     _camera = camera;
 
     static int testIndex = 0;
+    static int ox = 0, oy = -1, oz = 0;
     int debug = 0;
+    if (IsKeyPressed(KEY_ONE))
+    {
+        ox = 0;
+        oy = 1;
+        oz = 0;
+        debug = 1;
+    }
+    if (IsKeyPressed(KEY_TWO))
+    {
+        ox = 0;
+        oy = 0;
+        oz = 1;
+        debug = 1;
+    }
+    if (IsKeyPressed(KEY_THREE))
+    {
+        ox = 1;
+        oy = 0;
+        oz = 0;
+        debug = 1;
+    }
+    if (IsKeyPressed(KEY_FOUR))
+    {
+        ox = 0;
+        oy = -1;
+        oz = 0;
+        debug = 1;
+    }
+    if (IsKeyPressed(KEY_FIVE))
+    {
+        ox = 0;
+        oy = 0;
+        oz = 0;
+        debug = 1;
+    }
+
     if (IsKeyPressed(KEY_LEFT))
     {
         testIndex = (testIndex - 4 + _openEdgeMeshCount) % _openEdgeMeshCount;
@@ -663,7 +766,6 @@ void PiecePatcherDrawDebug()
         debug = 1;
     }
 
-    int ox = 0, oy = -1, oz = 0;
 
     OpenEdgeMesh *meshA = &_openEdgeMeshes[testIndex];
     if (debug) printf("Testing %s (%d)\n", meshA->mesh->name, testIndex);
@@ -674,7 +776,7 @@ void PiecePatcherDrawDebug()
         if (OpenEdgeMesh_isMatch(meshA, meshB, ox, oy, oz))
         {
             if (debug) printf("  Match %s (%d)\n", meshB->mesh->name, i);
-            TestMeshes((Vector3){x * 1.75f - 4.0f, 0.0f, z++ * 1.75f - 4.0f}, meshA, meshB, ox, oy, oz);
+            TestMeshes((Vector3){x * 2.5f - 4.0f, 0.0f, z++ * 2.5f - 4.0f}, meshA, meshB, ox, oy, oz);
             if (z == 4)
             {
                 z = 0;
@@ -683,6 +785,8 @@ void PiecePatcherDrawDebug()
         }
     }
 
+    // TestMeshes((Vector3){-3.0f, 0.0f, 0.0f}, &_openEdgeMeshes[0], &_openEdgeMeshes[0], 0, -1, 0);
+    // TestMeshes((Vector3){-3.0f, 0.0f, 1.5f}, &_openEdgeMeshes[44], &_openEdgeMeshes[32], 0, 0, 0);
     // TestMeshes((Vector3){4.5f, 0.0f, 1.5f}, &_openEdgeMeshes[76], &_openEdgeMeshes[60], 0, 1, 0);
     // TestMeshes((Vector3){4.5f, 0.0f, 1.5f}, &_openEdgeMeshes[0], &_openEdgeMeshes[56], 0, 0, -1);
     // TestMeshes((Vector3){0.0f, 0.0f, 1.5f}, &_openEdgeMeshes[0], &_openEdgeMeshes[3], 0, 0, 1);
@@ -696,7 +800,6 @@ void PiecePatcherDrawDebug()
     // TestMeshes((Vector3){-1.5f, 0.0f, -1.5f}, &_openEdgeMeshes[28], &_openEdgeMeshes[60], 0, 0, 0);
     // TestMeshes((Vector3){-1.5f, 0.0f, -3.0f}, &_openEdgeMeshes[28], &_openEdgeMeshes[50], 0, 0, 0);
     // TestMeshes((Vector3){1.5f, 0.0f, -3.0f}, &_openEdgeMeshes[71], &_openEdgeMeshes[55], 0, 1, 0);
-
     // TestMeshes((Vector3){-3.0f, 0.0f, 0.0f}, &_openEdgeMeshes[55], &_openEdgeMeshes[55], 1, 0, 0);
 
     // rlPushMatrix();
