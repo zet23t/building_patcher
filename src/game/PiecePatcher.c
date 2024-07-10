@@ -116,6 +116,11 @@ static void OpenEdgeMesh_tryAddEdge(OpenEdgeMesh *mesh, int v1, int v2, int v3)
         }
     }
 
+    if (mesh->mesh->texcoords2 && mesh->mesh->texcoords2[v1 * 2] > 0.5f)
+    {
+        printf("Found edge with texcoord %f %f\n", mesh->mesh->texcoords2[v1 * 2], mesh->mesh->texcoords2[v1 * 2 + 1]);
+    }
+
     if (edge.planeIndices != 0)
     {
         Vector3 c = (Vector3){mesh->mesh->vertices[v3 * 3], mesh->mesh->vertices[v3 * 3 + 1], mesh->mesh->vertices[v3 * 3 + 2]};
@@ -153,7 +158,7 @@ static bool MathIsPointOnLineSegment(Vector3 point, Vector3 a, Vector3 b, int db
     if (q < 0.0f)
         return false;
     float dote = Vector3DotProduct(e, e);
-    if (dote < 0.00001f)
+    if (dote < 0.000001f)
     {
         if (dbg) DrawCubeWires(a, 0.15f, 0.15f, 0.15f, WHITE);
         return true;
@@ -172,7 +177,7 @@ static bool MathIsPointOnLineSegment(Vector3 point, Vector3 a, Vector3 b, int db
     float dpy = py - point.y;
     float dpz = pz - point.z;
     float distance = dpx * dpx + dpy * dpy + dpz * dpz;
-    if (distance > 0.00001f)
+    if (distance > 0.000001f)
     {
         
         if (dbg)
@@ -208,32 +213,35 @@ static bool MeshEdge_hasMatchingPoints(MeshEdge edge, MeshEdge other, int offset
     // check if a1 is on the line b1-b2 or b1 is on the line a1-a2 and vice versa
     // return MathIsPointOnLineSegment(a2, b1, b2);
 
-    bool isA1OnB = MathIsPointOnLineSegment(a1, b1, b2, dbg);
-    bool isA2OnB = MathIsPointOnLineSegment(a2, b1, b2, dbg);
-    bool isB1OnA = MathIsPointOnLineSegment(b1, a1, a2, dbg);
-    bool isB2OnA = MathIsPointOnLineSegment(b2, a1, a2, dbg);
+    bool isA1OnB = MathIsPointOnLineSegment(a1, b1, b2, dbg == 2);
+    bool isA2OnB = MathIsPointOnLineSegment(a2, b1, b2, dbg == 2);
+    bool isB1OnA = MathIsPointOnLineSegment(b1, a1, a2, dbg == 2);
+    bool isB2OnA = MathIsPointOnLineSegment(b2, a1, a2, dbg == 2);
     if (overlap && (isA1OnB || isB2OnA) && (isA2OnB || isB1OnA))
     {
         if (isA1OnB && isA2OnB)
         {
             *overlap = edge.edgeLength;
-            GraphicsDrawArrow(_camera, a1, a2, 0.01f, RED);
+            if (dbg) GraphicsDrawArrow(_camera, a1, a2, 0.01f, RED);
         }
         else if (isB1OnA && isB2OnA)
         {
             *overlap = other.edgeLength;
-            GraphicsDrawArrow(_camera, b1, b2, 0.01f, BLUE);
+            if (dbg) GraphicsDrawArrow(_camera, b1, b2, 0.01f, BLUE);
         }
         else
         {
             Vector3 p1 = isA1OnB ? a1 : b2;
             Vector3 p2 = isA2OnB ? a2 : b1;
             *overlap = Vector3Distance(p1, p2);
-            DrawLine3D(a1, Vector3Add(a1, (Vector3){0, 0.2f, 0}), RED);
-            DrawLine3D(a2, Vector3Add(a2, (Vector3){0, 0.2f, 0}), RED);
-            DrawLine3D(b1, Vector3Add(b1, (Vector3){0, 0.2f, 0}), BLUE);
-            DrawLine3D(b2, Vector3Add(b2, (Vector3){0, 0.2f, 0}), BLUE);
-            GraphicsDrawArrow(_camera, p1, p2, 0.01f, GREEN);
+            if (dbg)
+            {
+                DrawLine3D(a1, Vector3Add(a1, (Vector3){0, 0.2f, 0}), RED);
+                DrawLine3D(a2, Vector3Add(a2, (Vector3){0, 0.2f, 0}), RED);
+                DrawLine3D(b1, Vector3Add(b1, (Vector3){0, 0.2f, 0}), BLUE);
+                DrawLine3D(b2, Vector3Add(b2, (Vector3){0, 0.2f, 0}), BLUE);
+                GraphicsDrawArrow(_camera, p1, p2, 0.01f, GREEN);
+            }
         }
     }
     // return (MathIsPointOnLineSegment(a1, b1, b2, dbg) || MathIsPointOnLineSegment(b2, a1, a2, dbg)) && (MathIsPointOnLineSegment(a2, b1, b2, dbg) || MathIsPointOnLineSegment(b1, a1, a2, dbg));
@@ -485,71 +493,95 @@ static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int of
     
     if (matchCount == 0 && cornersToMatchMask == 0)
     {
-        // no matches, but this could be a complex tile with non trivial edge loops
-        // let's try to find a brute force match: Find the longest consecutive edge loop
-        // that matches and if it's > 0.6 length, we consider it still a match
-        for (int i = 0; i < mesh->openEdgeCount; i++)
+        int meshEdgeStartIndex = 0;
+        int otherMeshEdgeStartIndex = 0;
+        float totalLength = 0;
+        // search first point that's on an edge of the other mesh
+        for (int j=0;j<other->openEdgeCount;j++)
         {
-            MeshEdge edge = mesh->openEdgeList[i];
-            // DrawLine3D(edge.p1, Vector3Add(edge.p1, (Vector3){0, 0.2f, 0}), RED);
-            for (int j = 0; j < other->openEdgeCount; j++)
+            MeshEdge otherEdge = other->openEdgeList[j];
+            Vector3 otherEdgeP1 = Vector3Add(otherEdge.p1, (Vector3){offsetX, offsetY, offsetZ});
+            Vector3 otherEdgeP2 = Vector3Add(otherEdge.p2, (Vector3){offsetX, offsetY, offsetZ});
+            for (int i = 0; i < mesh->openEdgeCount; i++)
             {
-                MeshEdge otherEdge = other->openEdgeList[j];
-                // DrawLine3D(Vector3Add(otherEdge.p1, (Vector3){offsetX, offsetY, offsetZ}), Vector3Add(otherEdge.p2, (Vector3){offsetX, offsetY, offsetZ}), BLUE);
-                float length = 0.0f;
-                if (MathIsPointOnLineSegment(edge.p1, 
-                            Vector3Add(otherEdge.p1, (Vector3){offsetX, offsetY, offsetZ}),
-                            Vector3Add(otherEdge.p2, (Vector3){offsetX, offsetY, offsetZ}), 0))
+                MeshEdge edge = mesh->openEdgeList[i];
+                float overlap = 0;
+                if (MeshEdge_hasMatchingPoints(edge, otherEdge, offsetX, offsetY, offsetZ, &overlap, 0))
                 {
-                    int start = otherEdge.v1;
-                    int loop = j;
-                    Vector3 pos = edge.p1;
-                    DrawLine3D(edge.p1, Vector3Add(edge.p1, (Vector3){0, 0.1f, 0}), RED);
-                    int lastMatched = i;
-                    int jumped = 0;
-                    for (int k = 0; k < mesh->openEdgeCount; k++)
-                    {
-                        int edgeIndex = (i + k) % mesh->openEdgeCount;
-                        MeshEdge edgeA = mesh->openEdgeList[edgeIndex];
-                        DrawLine3D(edgeA.p1, Vector3Add(edgeA.p1, (Vector3){0, 0.1f * k, 0}), RED);
-                        int matched = 0;
-                        while (matched == 0 && otherEdge.v2 != start)
-                        {
-                            if (MathIsPointOnLineSegment(edgeA.p1, 
-                                Vector3Add(otherEdge.p1, (Vector3){offsetX, offsetY, offsetZ}),
-                                Vector3Add(otherEdge.p2, (Vector3){offsetX, offsetY, offsetZ}), 0))
-                            {
-                                matched = 1;
-                            }
-                            else
-                            {
-                                if (!MeshEdge_hasMatchingPoints(edgeA, otherEdge, offsetX, offsetY, offsetZ, NULL, 0))
-                                {
-                                    pos = edgeA.p1;
-                                }
-                                break;
-                            }
-                            
-                            loop = (loop - 1 + other->openEdgeCount) % other->openEdgeCount;
-                            otherEdge = other->openEdgeList[loop];
-                            GraphicsDrawArrow(_camera, Vector3Add(otherEdge.p1, (Vector3){offsetX, offsetY, offsetZ}), Vector3Add(otherEdge.p2, (Vector3){offsetX, offsetY, offsetZ}), 0.01f, BLUE);
-                        }
-                        if (matched && k > 0)
-                        {
-                            length += Vector3Distance(pos, edgeA.p1);
-                            GraphicsDrawArrow(_camera, pos, edgeA.p1, 0.01f, RED);
-                            pos = edgeA.p1;
-                        }
-                    }
-
-                    
-                    // GraphicsDrawArrow(_camera, Vector3Add(min, (Vector3){offsetX, offsetY, offsetZ}), Vector3Add(otherEdge.p1, (Vector3){offsetX, offsetY, offsetZ}), 0.01f, RED);
-                    // length = Vector3Distance(min, otherEdge.p1);
-                    // printf("Length %2f\n", length);
-                    return length > 0.6f;
+                    totalLength += overlap;
                 }
             }
         }
+
+        // printf("Total length %f\n", totalLength);
+
+        return totalLength > 0.35f;
+
+        // // no matches, but this could be a complex tile with non trivial edge loops
+        // // let's try to find a brute force match: Find the longest consecutive edge loop
+        // // that matches and if it's > 0.6 length, we consider it still a match
+        // for (int i = 0; i < mesh->openEdgeCount; i++)
+        // {
+        //     MeshEdge edge = mesh->openEdgeList[i];
+        //     // DrawLine3D(edge.p1, Vector3Add(edge.p1, (Vector3){0, 0.2f, 0}), RED);
+        //     for (int j = 0; j < other->openEdgeCount; j++)
+        //     {
+        //         MeshEdge otherEdge = other->openEdgeList[j];
+        //         // DrawLine3D(Vector3Add(otherEdge.p1, (Vector3){offsetX, offsetY, offsetZ}), Vector3Add(otherEdge.p2, (Vector3){offsetX, offsetY, offsetZ}), BLUE);
+        //         float length = 0.0f;
+        //         if (MathIsPointOnLineSegment(edge.p1, 
+        //                     Vector3Add(otherEdge.p1, (Vector3){offsetX, offsetY, offsetZ}),
+        //                     Vector3Add(otherEdge.p2, (Vector3){offsetX, offsetY, offsetZ}), 0))
+        //         {
+        //             int start = otherEdge.v1;
+        //             int loop = j;
+        //             Vector3 pos = edge.p1;
+        //             DrawLine3D(edge.p1, Vector3Add(edge.p1, (Vector3){0, 0.1f, 0}), RED);
+        //             int lastMatched = i;
+        //             int jumped = 0;
+        //             for (int k = 0; k < mesh->openEdgeCount; k++)
+        //             {
+        //                 int edgeIndex = (i + k) % mesh->openEdgeCount;
+        //                 MeshEdge edgeA = mesh->openEdgeList[edgeIndex];
+        //                 DrawLine3D(edgeA.p1, Vector3Add(edgeA.p1, (Vector3){0, 0.1f * k, 0}), RED);
+        //                 int matched = 0;
+        //                 while (matched == 0 && otherEdge.v2 != start)
+        //                 {
+        //                     if (MathIsPointOnLineSegment(edgeA.p1, 
+        //                         Vector3Add(otherEdge.p1, (Vector3){offsetX, offsetY, offsetZ}),
+        //                         Vector3Add(otherEdge.p2, (Vector3){offsetX, offsetY, offsetZ}), 0))
+        //                     {
+        //                         matched = 1;
+        //                     }
+        //                     else
+        //                     {
+        //                         if (!MeshEdge_hasMatchingPoints(edgeA, otherEdge, offsetX, offsetY, offsetZ, NULL, 0))
+        //                         {
+        //                             pos = edgeA.p1;
+        //                         }
+        //                         break;
+        //                     }
+                            
+        //                     loop = (loop - 1 + other->openEdgeCount) % other->openEdgeCount;
+        //                     otherEdge = other->openEdgeList[loop];
+        //                     GraphicsDrawArrow(_camera, Vector3Add(otherEdge.p1, (Vector3){offsetX, offsetY, offsetZ}), Vector3Add(otherEdge.p2, (Vector3){offsetX, offsetY, offsetZ}), 0.01f, BLUE);
+        //                 }
+        //                 if (matched && k > 0)
+        //                 {
+        //                     length += Vector3Distance(pos, edgeA.p1);
+        //                     GraphicsDrawArrow(_camera, pos, edgeA.p1, 0.01f, RED);
+        //                     pos = edgeA.p1;
+        //                 }
+        //             }
+
+                    
+        //             // GraphicsDrawArrow(_camera, Vector3Add(min, (Vector3){offsetX, offsetY, offsetZ}), Vector3Add(otherEdge.p1, (Vector3){offsetX, offsetY, offsetZ}), 0.01f, RED);
+        //             // length = Vector3Distance(min, otherEdge.p1);
+        //             // printf("Length %2f\n", length);
+        //             return length > 0.6f;
+        //         }
+        //     }
+        // }
     }
     
     return matchCount > 0 && cornersToMatchMask == 0;
