@@ -33,6 +33,8 @@ typedef struct MeshEdge
     // could be an index too, but this way the bit rotation works too
     uint8_t cornerBits1;
     uint8_t cornerBits2;
+    uint8_t startPointMarker1;
+    uint8_t startPointMarker2;
 } MeshEdge;
 
 typedef struct OpenEdgeMesh
@@ -48,6 +50,7 @@ typedef struct OpenEdgeMesh
 
 static OpenEdgeMesh *_openEdgeMeshes;
 static int _openEdgeMeshCount;
+static int _openEdgeMeshCapacity;
 Vector3 _cubeCorners[] = {
     {-0.5f, 0.0f, -0.5f},
     {0.5f, 0.0f, -0.5f},
@@ -58,6 +61,15 @@ Vector3 _cubeCorners[] = {
     {0.5f, 1.0f, 0.5f},
     {-0.5f, 1.0f, 0.5f},
 };
+
+static Model _buildingPieces;
+static uint8_t *_edgeMarkers;
+static int _edgeMarkerCapacity;
+static int *_verticeMergeMap;
+static int _verticeMergeMapCapacity;
+static int *_verticeTriangleCounter;
+static int _verticeTriangleCounterCapacity;
+
 
 static int getCornerIndex(Vector3 corner)
 {
@@ -71,9 +83,18 @@ static int getCornerIndex(Vector3 corner)
     return -1;
 }
 
+static void OpenEdgeMesh_ensureCapacity(int capacity)
+{
+    if (_openEdgeMeshCapacity < capacity)
+    {
+        _openEdgeMeshCapacity = capacity;
+        _openEdgeMeshes = STRUCT_REALLOC(_openEdgeMeshes, OpenEdgeMesh, _openEdgeMeshCapacity);
+    }
+}
+
 static OpenEdgeMesh *OpenEdgeMesh_allocate(Mesh *mesh)
 {
-    _openEdgeMeshes = STRUCT_REALLOC(_openEdgeMeshes, OpenEdgeMesh, _openEdgeMeshCount + 1);
+    OpenEdgeMesh_ensureCapacity(_openEdgeMeshCount + 1);
     OpenEdgeMesh *openEdgeMesh = &_openEdgeMeshes[_openEdgeMeshCount];
     *openEdgeMesh = (OpenEdgeMesh){0};
     openEdgeMesh->mesh = mesh;
@@ -99,7 +120,7 @@ static float PlaneDistance(Vector3 point, EdgePlane plane)
     return Vector3DotProduct(point, plane.normal) - plane.distance;
 }
 
-static void OpenEdgeMesh_tryAddEdge(OpenEdgeMesh *mesh, int v1, int v2, int v3)
+static void OpenEdgeMesh_tryAddEdge(OpenEdgeMesh *mesh, int v1, int v2, int v3, int hasMarkedCorners)
 {
     Vector3 a = (Vector3){mesh->mesh->vertices[v1 * 3], mesh->mesh->vertices[v1 * 3 + 1], mesh->mesh->vertices[v1 * 3 + 2]};
     Vector3 b = (Vector3){mesh->mesh->vertices[v2 * 3], mesh->mesh->vertices[v2 * 3 + 1], mesh->mesh->vertices[v2 * 3 + 2]};
@@ -116,18 +137,20 @@ static void OpenEdgeMesh_tryAddEdge(OpenEdgeMesh *mesh, int v1, int v2, int v3)
         }
     }
 
-    if (mesh->mesh->texcoords2 && mesh->mesh->texcoords2[v1 * 2] > 0.5f)
-    {
-        printf("Found edge with texcoord %f %f\n", mesh->mesh->texcoords2[v1 * 2], mesh->mesh->texcoords2[v1 * 2 + 1]);
-    }
+    // if (mesh->mesh->texcoords2 && mesh->mesh->texcoords2[v1 * 2] > 0.5f)
+    // {
+    //     printf("Found edge with texcoord %f %f\n", mesh->mesh->texcoords2[v1 * 2], mesh->mesh->texcoords2[v1 * 2 + 1]);
+    // }
 
     if (edge.planeIndices != 0)
     {
         Vector3 c = (Vector3){mesh->mesh->vertices[v3 * 3], mesh->mesh->vertices[v3 * 3 + 1], mesh->mesh->vertices[v3 * 3 + 2]};
         int cornerIndexA = getCornerIndex(a);
         int cornerIndexB = getCornerIndex(b);
-        edge.cornerBits1 = cornerIndexA == -1 ? 0 : 1 << cornerIndexA;
-        edge.cornerBits2 = cornerIndexB == -1 ? 0 : 1 << cornerIndexB;
+        edge.cornerBits1 = cornerIndexA == -1 || hasMarkedCorners ? 0 : 1 << cornerIndexA;
+        edge.cornerBits2 = cornerIndexB == -1 || hasMarkedCorners ? 0 : 1 << cornerIndexB;
+        edge.startPointMarker1 = _verticeTriangleCounter[v1] < 0 || edge.cornerBits1 != 0;
+        edge.startPointMarker2 = _verticeTriangleCounter[v2] < 0 || edge.cornerBits2 != 0;
         edge.p1 = a;
         edge.p2 = b;
         edge.edgeLength = Vector3Distance(a, b);
@@ -330,7 +353,7 @@ static int HighestBitOf(int bits)
 static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int offsetX, int offsetY, int offsetZ)
 {
     int matchCount = 0;
-    int cornersToMatchMask = mesh->cubeCornerSet & OpenEdgeMesh_mapCornerBitSet(other->cubeCornerSet, offsetX, offsetY, offsetZ);
+    // int cornersToMatchMask = mesh->cubeCornerSet & OpenEdgeMesh_mapCornerBitSet(other->cubeCornerSet, offsetX, offsetY, offsetZ);
     
     // OpenEdgeMesh_drawCornerBitset(mesh->cubeCornerSet, (Vector3){0, 0, 0}, 0.1f, RED);
     // OpenEdgeMesh_drawCornerBitset(other->cubeCornerSet, (Vector3){offsetX, offsetY, offsetZ}, 0.075f, BLUE);
@@ -384,7 +407,7 @@ static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int of
     {
         MeshEdge edge = mesh->openEdgeList[i];
 
-        if (edge.cornerBits1 == 0)
+        if (edge.startPointMarker1 == 0)
             continue;
         Vector3 a1 = edge.p1;
         Vector3 a2 = edge.p2;
@@ -392,23 +415,25 @@ static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int of
         // DrawCubeWires(a1, 0.1f, 0.1f, 0.1f, RED);
         for (int j = 0; j < other->openEdgeCount; j++)
         {
-            int loopCornerBits = edge.cornerBits1;
+            int loopCornerBits = edge.startPointMarker1;
             MeshEdge otherEdge = other->openEdgeList[j];
-            if (otherEdge.cornerBits2 == 0)
+            if (otherEdge.startPointMarker2 == 0)
                 continue;
             Vector3 b1 = Vector3Add(otherEdge.p1, (Vector3){offsetX, offsetY, offsetZ});
             Vector3 b2 = Vector3Add(otherEdge.p2, (Vector3){offsetX, offsetY, offsetZ});
+            // DrawLine3D(b2, Vector3Add(b2, (Vector3){0, 0.2f, 0}), BLUE);
             // are the corners at the same position? (=starting point of the loop)
             if (Vector3DistanceSqr(a1, b2) > 0.0001f)
                 continue;
-                
             if (!MeshEdge_hasMatchingPoints(edge, otherEdge, offsetX, offsetY, offsetZ, NULL, 0))
             {
                 // We need an initial match to start looking at the edge loop
                 continue;
             }
+            // DrawCubeWires(b2, 0.15f, 0.15f, 0.15f, BLUE);
             // DrawCubeWires(a1, 0.1f, 0.1f, 0.1f, RED);
             // DrawCubeWires(b2, 0.15f, 0.15f, 0.15f, BLUE);
+
             // every point of the mesh edge loop must lie on the other edge loop until
             // it reaches a corner point
             int k = j;
@@ -416,6 +441,7 @@ static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int of
             {
                 int edgeAIndex = (i - n + mesh->openEdgeCount) % mesh->openEdgeCount;
                 MeshEdge edgeA = mesh->openEdgeList[edgeAIndex];
+                // GraphicsDrawArrow(_camera, edgeA.p1, edgeA.p2, 0.01f, RED);
                 if (!MeshEdge_hasMatchingPoints(edgeA, other->openEdgeList[k], offsetX, offsetY, offsetZ, NULL, 0)
                     // || !MathIsPointOnLineSegment(Vector3Add(edgeA.p1, (Vector3){-offsetX, -offsetY, -offsetZ}), 
                     //     other->openEdgeList[k].p1, other->openEdgeList[k].p2, 0)
@@ -433,17 +459,19 @@ static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int of
                             valid = true;
                             break;
                         }
-                    } while (other->openEdgeList[k].cornerBits2 == 0);
+                    } while (other->openEdgeList[k].startPointMarker2 == 0);
                     if (!valid)
                     {
+                        // DrawCube(b2, 0.15f, 0.15f, 0.15f, BLUE);
+
                         return false;
                     }
-                    // loopCornerBits |= OpenEdgeMesh_mapCornerBitSet(other->openEdgeList[k].cornerBits2, offsetX, offsetY, offsetZ);
+                    // loopCornerBits |= OpenEdgeMesh_mapCornerBitSet(other->openEdgeList[k].startPointMarker2, offsetX, offsetY, offsetZ);
                 }
                 // GraphicsDrawArrow(_camera, edgeA.p1, edgeA.p2, 0.01f, BLUE);
-                if (edgeA.cornerBits2 != 0)
+                if (edgeA.startPointMarker2 != 0)
                 {
-                    loopCornerBits |= edgeA.cornerBits2;
+                    loopCornerBits |= edgeA.startPointMarker2;
                     break;
                 }
             }
@@ -465,11 +493,14 @@ static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int of
                             valid = true;
                             break;
                         }
-                    } while (mesh->openEdgeList[l].cornerBits2 == 0);
-                    if (!valid)
+                    } while (mesh->openEdgeList[l].startPointMarker2 == 0);
+                    if (!valid && mesh->openEdgeList[l].startPointMarker2 == 0)
                     {
+                        // DrawCube(b2, 0.05f, 0.05f, 0.05f, RED);
                         return false;
                     }
+                    // DrawCube(b2, 0.05f, 0.05f, 0.05f, GREEN);
+
                     // loopCornerBits |= mesh->openEdgeList[l].cornerBits2;
                 }
 
@@ -478,44 +509,44 @@ static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int of
                 //     Vector3Add(edgeB.p1, (Vector3){offsetX, offsetY, offsetZ}),
                 //     Vector3Add(edgeB.p2, (Vector3){offsetX, offsetY, offsetZ}),
                 //     0.01f, GREEN);
-                if (edgeB.cornerBits1 != 0)
+                if (edgeB.startPointMarker1 != 0)
                 {
-                    loopCornerBits |= OpenEdgeMesh_mapCornerBitSet(edgeB.cornerBits1, offsetX, offsetY, offsetZ);
+                    loopCornerBits |= OpenEdgeMesh_mapCornerBitSet(edgeB.startPointMarker1, offsetX, offsetY, offsetZ);
                     break;
                 }
             }
             
             // OpenEdgeMesh_drawCornerBitset(loopCornerBits, (Vector3){offsetX, offsetY, offsetZ}, 0.125f, YELLOW);
-            cornersToMatchMask &= ~loopCornerBits;
+            // cornersToMatchMask &= ~loopCornerBits;
             matchCount++;
         }
     }
     
-    if (matchCount == 0 && cornersToMatchMask == 0)
+    // if (matchCount == 0 && cornersToMatchMask == 0)
     {
-        int meshEdgeStartIndex = 0;
-        int otherMeshEdgeStartIndex = 0;
-        float totalLength = 0;
-        // search first point that's on an edge of the other mesh
-        for (int j=0;j<other->openEdgeCount;j++)
-        {
-            MeshEdge otherEdge = other->openEdgeList[j];
-            Vector3 otherEdgeP1 = Vector3Add(otherEdge.p1, (Vector3){offsetX, offsetY, offsetZ});
-            Vector3 otherEdgeP2 = Vector3Add(otherEdge.p2, (Vector3){offsetX, offsetY, offsetZ});
-            for (int i = 0; i < mesh->openEdgeCount; i++)
-            {
-                MeshEdge edge = mesh->openEdgeList[i];
-                float overlap = 0;
-                if (MeshEdge_hasMatchingPoints(edge, otherEdge, offsetX, offsetY, offsetZ, &overlap, 0))
-                {
-                    totalLength += overlap;
-                }
-            }
-        }
+        // int meshEdgeStartIndex = 0;
+        // int otherMeshEdgeStartIndex = 0;
+        // float totalLength = 0;
+        // // search first point that's on an edge of the other mesh
+        // for (int j=0;j<other->openEdgeCount;j++)
+        // {
+        //     MeshEdge otherEdge = other->openEdgeList[j];
+        //     Vector3 otherEdgeP1 = Vector3Add(otherEdge.p1, (Vector3){offsetX, offsetY, offsetZ});
+        //     Vector3 otherEdgeP2 = Vector3Add(otherEdge.p2, (Vector3){offsetX, offsetY, offsetZ});
+        //     for (int i = 0; i < mesh->openEdgeCount; i++)
+        //     {
+        //         MeshEdge edge = mesh->openEdgeList[i];
+        //         float overlap = 0;
+        //         if (MeshEdge_hasMatchingPoints(edge, otherEdge, offsetX, offsetY, offsetZ, &overlap, 0))
+        //         {
+        //             totalLength += overlap;
+        //         }
+        //     }
+        // }
 
-        // printf("Total length %f\n", totalLength);
+        // // printf("Total length %f\n", totalLength);
 
-        return totalLength > 0.35f;
+        // return totalLength > 0.35f;
 
         // // no matches, but this could be a complex tile with non trivial edge loops
         // // let's try to find a brute force match: Find the longest consecutive edge loop
@@ -583,15 +614,13 @@ static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int of
         //     }
         // }
     }
-    
-    return matchCount > 0 && cornersToMatchMask == 0;
+    return matchCount > 0;// && cornersToMatchMask == 0;
 }
 
-static Model _buildingPieces;
-static uint8_t *_edgeMarkers;
-static int _edgeMarkerCapacity;
-static int *_verticeMergeMap;
-static int _verticeMergeMapCapacity;
+static int GetMappedVertexIndex(int index)
+{
+    return _verticeMergeMap[index] == -1 ? index : _verticeMergeMap[index];
+}
 
 static int GetEdgeIndex(int edgeCount, int v1, int v2)
 {
@@ -604,6 +633,13 @@ static int GetEdgeIndex(int edgeCount, int v1, int v2)
 
 static void PrepareEdgeCache(int edgeCount, int vertexCount)
 {
+    if (_verticeTriangleCounterCapacity < vertexCount)
+    {
+        _verticeTriangleCounter = STRUCT_REALLOC(_verticeTriangleCounter, int, vertexCount);
+        _verticeTriangleCounterCapacity = vertexCount;
+    }
+    memset(_verticeTriangleCounter, 0, vertexCount * sizeof(int));
+
     if (_verticeMergeMapCapacity < vertexCount)
     {
         _verticeMergeMap = STRUCT_REALLOC(_verticeMergeMap, int, vertexCount);
@@ -684,7 +720,14 @@ static OpenEdgeMesh *OpenEdgeMesh_rotateCW(OpenEdgeMesh *mesh)
     for (int i = 0; i < mesh->openEdgeCount; i++)
     {
         MeshEdge edge = mesh->openEdgeList[i];
-        MeshEdge newEdge = (MeshEdge){.v1 = edge.v2, .v2 = edge.v1, .planeIndices = edge.planeIndices, .cornerBits1 = rotateBitsCW(edge.cornerBits1), .cornerBits2 = rotateBitsCW(edge.cornerBits2)};
+        MeshEdge newEdge = (MeshEdge){
+            .v1 = edge.v2, 
+            .v2 = edge.v1, 
+            .planeIndices = edge.planeIndices,
+            .startPointMarker1 = edge.startPointMarker1,
+            .startPointMarker2 = edge.startPointMarker2,
+            .cornerBits1 = rotateBitsCW(edge.cornerBits1), 
+            .cornerBits2 = rotateBitsCW(edge.cornerBits2)};
         if ((newEdge.cornerBits1 == 0) ^ (edge.cornerBits1 == 0))
         {
             TraceLog(LOG_WARNING, "Corner bits 1 zeroed of %s@%d %d %d", mesh->mesh->name, mesh->rotation, newEdge.cornerBits1, edge.cornerBits1);
@@ -740,21 +783,60 @@ static OpenEdgeMesh *OpenEdgeMesh_build(Mesh *mesh, Vector3 planePoint, Vector3 
     OpenEdgeMesh *openEdgeMesh = OpenEdgeMesh_allocate(mesh);
     for (int i = 0; i < triangleCount; i += 3)
     {
-        MarkEdge(edgeCount, mesh->indices[i], mesh->indices[i + 1]);
-        MarkEdge(edgeCount, mesh->indices[i + 1], mesh->indices[i + 2]);
-        MarkEdge(edgeCount, mesh->indices[i + 2], mesh->indices[i]);
+        int a = mesh->indices[i];
+        int b = mesh->indices[i + 1];
+        int c = mesh->indices[i + 2];
+        MarkEdge(edgeCount, a, b);
+        MarkEdge(edgeCount, b, c);
+        MarkEdge(edgeCount, c, a);
+        _verticeTriangleCounter[GetMappedVertexIndex(a)]++;
+        _verticeTriangleCounter[GetMappedVertexIndex(b)]++;
+        _verticeTriangleCounter[GetMappedVertexIndex(c)]++;
     }
+    
+    int markedCornerCount = 0;
+    // flag vertex index of single triangle marked vertices with a negative counter so we can
+    // flag them as corner points
     for (int i = 0; i < triangleCount; i += 3)
     {
-        bool borderA = IsBorderEdge(edgeCount, mesh->indices[i], mesh->indices[i + 1], mesh->vertices);
-        bool borderB = IsBorderEdge(edgeCount, mesh->indices[i + 1], mesh->indices[i + 2], mesh->vertices);
-        bool borderC = IsBorderEdge(edgeCount, mesh->indices[i + 2], mesh->indices[i], mesh->vertices);
+        int a = GetMappedVertexIndex(mesh->indices[i]);
+        int b = GetMappedVertexIndex(mesh->indices[i + 1]);
+        int c = GetMappedVertexIndex(mesh->indices[i + 2]);
+        int countA = _verticeTriangleCounter[a];
+        int countB = _verticeTriangleCounter[b];
+        int countC = _verticeTriangleCounter[c];
+        if ((countA == 1 && countB == 1) || (countB == 1 && countC == 1) || (countC == 1 && countA == 1))
+        {
+            if (countA > 1) _verticeTriangleCounter[a] = -countA, markedCornerCount++;
+            if (countB > 1) _verticeTriangleCounter[b] = -countB, markedCornerCount++;
+            if (countC > 1) _verticeTriangleCounter[c] = -countC, markedCornerCount++;
+        }
+
+    }
+
+    for (int i = 0; i < triangleCount; i += 3)
+    {
+        int a = GetMappedVertexIndex(mesh->indices[i]);
+        int b = GetMappedVertexIndex(mesh->indices[i + 1]);
+        int c = GetMappedVertexIndex(mesh->indices[i + 2]);
+        int countA = _verticeTriangleCounter[a];
+        int countB = _verticeTriangleCounter[b];
+        int countC = _verticeTriangleCounter[c];
+        if ((countA == 1 && countB == 1) || (countB == 1 && countC == 1) || (countC == 1 && countA == 1))
+        {
+            // skip triangle markers
+            continue;
+        }
+
+        bool borderA = IsBorderEdge(edgeCount, a, b, mesh->vertices);
+        bool borderB = IsBorderEdge(edgeCount, b, c, mesh->vertices);
+        bool borderC = IsBorderEdge(edgeCount, c, a, mesh->vertices);
         if (borderA)
-            OpenEdgeMesh_tryAddEdge(openEdgeMesh, mesh->indices[i], mesh->indices[i + 1], mesh->indices[i + 2]);
+            OpenEdgeMesh_tryAddEdge(openEdgeMesh, a, b, c, markedCornerCount);
         if (borderB)
-            OpenEdgeMesh_tryAddEdge(openEdgeMesh, mesh->indices[i + 1], mesh->indices[i + 2], mesh->indices[i]);
+            OpenEdgeMesh_tryAddEdge(openEdgeMesh, b, c, a, markedCornerCount);
         if (borderC)
-            OpenEdgeMesh_tryAddEdge(openEdgeMesh, mesh->indices[i + 2], mesh->indices[i], mesh->indices[i + 1]);
+            OpenEdgeMesh_tryAddEdge(openEdgeMesh, c, a, b, markedCornerCount);
 
         if (!borderA && !borderB && !borderC)
             continue;
@@ -803,6 +885,7 @@ void PiecePatcherInit()
     printf("_buildingPieces loaded, found %d meshes\n", _buildingPieces.meshCount);
     for (int i = 0; i < _buildingPieces.meshCount; i++)
     {
+        OpenEdgeMesh_ensureCapacity(_openEdgeMeshCount + 4);
         OpenEdgeMesh *meshA = OpenEdgeMesh_build(&_buildingPieces.meshes[i], (Vector3){0.5f, 0, 0}, (Vector3){1.0, 0.0f, 0.0f});
         OpenEdgeMesh *meshB = OpenEdgeMesh_rotateCW(meshA);
         OpenEdgeMesh *meshC = OpenEdgeMesh_rotateCW(meshB);
@@ -818,13 +901,13 @@ void PiecePatcherInit()
 static void OpenEdgeMesh_drawDebug(Camera camera, OpenEdgeMesh *openEdgeMesh)
 {
     DrawCubeWires((Vector3){0, 0.5f, 0}, 1.0f, 1.0f, 1.0f, RED);
-    for (int j = 0; j < 8; j++)
-    {
-        if (openEdgeMesh->cubeCornerSet & (1 << j))
-        {
-            DrawCubeWires(_cubeCorners[j], 0.1f, 0.1f, 0.1f, GREEN);
-        }
-    }
+    // for (int j = 0; j < 8; j++)
+    // {
+    //     if (openEdgeMesh->cubeCornerSet & (1 << j))
+    //     {
+    //         DrawCubeWires(_cubeCorners[j], 0.1f, 0.1f, 0.1f, GREEN);
+    //     }
+    // }
     for (int j = 0; j < openEdgeMesh->openEdgeCount; j++)
     {
         int progress = 255 * j / (openEdgeMesh->openEdgeCount - 1);
@@ -833,7 +916,11 @@ static void OpenEdgeMesh_drawDebug(Camera camera, OpenEdgeMesh *openEdgeMesh)
         Vector3 b = edge.p2;
         Vector3 center = Vector3Scale(Vector3Add(a, b), 0.5f);
         Color color = (Color){0, progress, 255 - progress, 255};
-        GraphicsDrawArrow(camera, a, b, 0.02f, color);
+        GraphicsDrawArrow(camera, a, b, 0.005f, color);
+        if (edge.startPointMarker1)
+        {
+            DrawCubeWires(a, 0.1f, 0.1f, 0.1f, WHITE);
+        }
         // DrawLine3D(a, b, color);
         // DrawLine3D(center, Vector3Add(center, Vector3Scale(edge.triangleNormal, 0.1f)), RED);
         // for (int k=0;k<6;k++)
@@ -883,9 +970,9 @@ static void TestMeshes(Vector3 position, OpenEdgeMesh *meshA, OpenEdgeMesh *mesh
 
     if (outlines)
     {
-        OpenEdgeMesh_drawDebug(_camera, meshA);
+        if (outlines & 1) OpenEdgeMesh_drawDebug(_camera, meshA);
         rlTranslatef(offsetX, offsetY, offsetZ);
-        OpenEdgeMesh_drawDebug(_camera, meshB);
+        if (outlines & 2) OpenEdgeMesh_drawDebug(_camera, meshB);
     }
     
     rlPopMatrix();
@@ -938,7 +1025,7 @@ void PiecePatcherDrawDebug()
     static int outlines = 1;
     if (IsKeyPressed(KEY_O))
     {
-        outlines = (outlines + 1) % 2;
+        outlines = (outlines + 1) % 4;
     }
     if (IsKeyPressed(KEY_M))
     {
@@ -1045,9 +1132,11 @@ void PiecePatcherDrawDebug()
             // 88, 96, 1, 0, 0,
             // 84, 96, 1, 0, 0,
             // 152, 0, 0, 0, 1,
-            152, 132, 1, 0, 0,
-            136, 104, 1, 0, 0,
-            120, 119, 1, 0, 0,
+            // 152, 132, 1, 0, 0,
+            // 136, 104, 1, 0, 0,
+            // 120, 119, 1, 0, 0,
+            // 119, 115, 0, 0, 1,
+            164, 87, 1, 0, 0,
         };
 
         float width = fminf(sizeof(testcases) / sizeof(int) / 5 - 1, 5) * 2.5f;
