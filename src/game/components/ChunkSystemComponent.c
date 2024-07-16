@@ -1,4 +1,5 @@
 #include "game/game.h"
+#include "game/PiecePatcher.h"
 
 
 // add a random flappy bird level chunk geometry
@@ -8,46 +9,140 @@ SceneObjectId addChunk(SceneGraph *graph, int chunkX, int chunkLength, SceneComp
     SceneGraph_setLocalPosition(graph, chunkId, (Vector3){chunkX, 0.0f, 0.0f});
     // add ground
 
-    SceneObjectId groundId = SceneGraph_createObject(graph, "Ground");
-    SceneGraph_addComponent(graph, groundId, _componentIdMap.PrimitiveRendererComponentId,
-        &(PrimitiveRendererComponent) {
-            .primitiveType = PRIMITIVE_TYPE_CUBE,
-            .color = (Color){0, 128, 0, 255},
-            .size = (Vector3){chunkLength, 1.0f, 1.0f},
-        });
-    SceneGraph_addComponent(graph, groundId, _componentIdMap.BoxColliderComponentId,
-        &(BoxColliderComponent) {
-            .size = (Vector3){chunkLength, 1.0f, 1.0f},
-        });
-    SceneGraph_setLocalPosition(graph, groundId, (Vector3){chunkLength * 0.5f, -2.5f, 0.0f});
-    SceneGraph_setParent(graph, groundId, chunkId);
-
-    // add buildings
-    SceneObjectId buildingId = SceneGraph_createObject(graph, "Building");
-    int buildingWidth = 1; //GetRandomValue(1, 3);
-    int buildingOffset = GetRandomValue(0, chunkLength - buildingWidth);
-    int buildingHeight = 1;// GetRandomValue(1, 4);
-
-    // SceneGraph_addComponent(graph, buildingId, _componentIdMap.PrimitiveRendererComponentId,
+    // SceneObjectId groundId = SceneGraph_createObject(graph, "Ground");
+    // SceneGraph_addComponent(graph, groundId, _componentIdMap.PrimitiveRendererComponentId,
     //     &(PrimitiveRendererComponent) {
     //         .primitiveType = PRIMITIVE_TYPE_CUBE,
-    //         .color = (Color){128, 128, 128, 255},
-    //         .size = (Vector3){buildingWidth, buildingHeight, 1.0f},
+    //         .color = (Color){0, 128, 0, 255},
+    //         .size = (Vector3){chunkLength, 1.0f, 1.0f},
     //     });
-    SceneGraph_addComponent(graph, buildingId, _componentIdMap.BoxColliderComponentId,
-        &(BoxColliderComponent) {
-            .size = (Vector3){buildingWidth, buildingHeight, 1.0f},
-            .offset = (Vector3){0.0f, buildingHeight * 0.5f, 0.0f},
-        });
-    SceneGraph_setLocalPosition(graph, buildingId, (Vector3){buildingOffset, (buildingHeight * 0.5f) - 2.0f, 0.0f});
+    // SceneGraph_addComponent(graph, groundId, _componentIdMap.BoxColliderComponentId,
+    //     &(BoxColliderComponent) {
+    //         .size = (Vector3){chunkLength, 1.0f, 1.0f},
+    //     });
+    // SceneGraph_setLocalPosition(graph, groundId, (Vector3){chunkLength * 0.5f, -2.5f, 0.0f});
+    // SceneGraph_setParent(graph, groundId, chunkId);
+
+    // // add buildings
+    SceneObjectId buildingId = SceneGraph_createObject(graph, "Building");
+    // int buildingWidth = 1; //GetRandomValue(1, 3);
+    // int buildingOffset = GetRandomValue(0, chunkLength - buildingWidth);
+    // int buildingHeight = 1;// GetRandomValue(1, 4);
+
+    // // SceneGraph_addComponent(graph, buildingId, _componentIdMap.PrimitiveRendererComponentId,
+    // //     &(PrimitiveRendererComponent) {
+    // //         .primitiveType = PRIMITIVE_TYPE_CUBE,
+    // //         .color = (Color){128, 128, 128, 255},
+    // //         .size = (Vector3){buildingWidth, buildingHeight, 1.0f},
+    // //     });
+    // SceneGraph_addComponent(graph, buildingId, _componentIdMap.BoxColliderComponentId,
+    //     &(BoxColliderComponent) {
+    //         .size = (Vector3){buildingWidth, buildingHeight, 1.0f},
+    //         .offset = (Vector3){0.0f, buildingHeight * 0.5f, 0.0f},
+    //     });
+    // SceneGraph_setLocalPosition(graph, buildingId, (Vector3){buildingOffset, (buildingHeight * 0.5f) - 2.0f, 0.0f});
     SceneGraph_setParent(graph, buildingId, chunkId);
 
-    Model buildingMesh = ResourceManager_loadModel(_resourceManager, "assets/building.obj");
-    SceneGraph_addComponent(graph, buildingId, _componentIdMap.MeshRendererComponentId,
-        &(MeshRendererComponent) {
-            .material = &buildingMesh.materials[buildingMesh.materialCount - 1],
-            .mesh = &buildingMesh.meshes[0],
-        });
+    PlacedPiece placedPieces[4*4*4*4];
+    int placedPieceCount = 0;
+    
+    #define ADD_PIECE(x, y, z, index) { \
+        placedPieces[placedPieceCount++] = (PlacedPiece){ \
+            .offsetX = x, \
+            .offsetY = y, \
+            .offsetZ = z, \
+            .pieceIndex = index, \
+        }; \
+    }
+    #define SHIFT(dx, dy, dz) for (int _i = 0; _i < placedPieceCount; _i++) { \
+        placedPieces[_i].offsetX += dx; \
+        placedPieces[_i].offsetY += dy; \
+        placedPieces[_i].offsetZ += dz; \
+    }
+    #define ADD_RANDOM_PIECE() \
+        { int _count = PiecePatcher_getCompatibleMeshCountEx(placedPieces, placedPieceCount, MESH_TILE_MATCH_BUILD_MASK); \
+        if (_count > 0) { \
+            int _select = GetRandomValue(0, _count - 1); \
+            int _index = PiecePatcher_getCompatibleMeshByIndexEx(placedPieces, placedPieceCount, MESH_TILE_MATCH_BUILD_MASK, _select); \
+            ADD_PIECE(0, 0, 0, _index); \
+        } \
+        else TraceLog(LOG_WARNING, "No compatible pieces found %s:%d",__FILE__, __LINE__);\
+        }
+    #define ADD_RANDOM_PIECE_AT(x,y,z) \
+        SHIFT(x, y, z); ADD_RANDOM_PIECE(); SHIFT(-x, -y, -z);
+
+    ADD_PIECE(0, 0, 0, 1);
+    ADD_RANDOM_PIECE_AT(1, 0, 0);
+    ADD_RANDOM_PIECE_AT(1, 0, 0);
+    ADD_RANDOM_PIECE_AT(0, 1, 0);
+    ADD_RANDOM_PIECE_AT(1, 1, 0);
+    
+
+    #undef ADD_PIECE
+    #undef SHIFT
+    #undef ADD_RANDOM_PIECE
+    #undef ADD_RANDOM_PIECE_AT
+
+    for (int i=0; i < placedPieceCount; i++)
+    {
+        int index = placedPieces[i].pieceIndex;
+        char name[64];
+        Mesh *mesh = PiecePatcher_getMesh(index);
+        snprintf(name, sizeof(name), "C:%s-%d", mesh->name, index);
+
+        SceneObjectId element = SceneGraph_createObject(graph, name);
+        SceneGraph_addComponent(graph, element, _componentIdMap.MeshRendererComponentId,
+            &(MeshRendererComponent) {
+                .material = PiecePatcher_getMaterial(index),
+                .mesh = mesh,
+            });
+        SceneGraph_setParent(graph, element, buildingId);
+        SceneGraph_setLocalPosition(graph, element, (Vector3){placedPieces[i].offsetX, placedPieces[i].offsetY, placedPieces[i].offsetZ});
+        SceneGraph_setLocalRotation(graph, element, (Vector3){0.0f, -90.0f * PiecePatcher_getRotation(index), 0.0f});
+    }
+
+
+
+    // Model buildingMesh = ResourceManager_loadModel(_resourceManager, "assets/building.obj");
+    // int index = 1;
+
+    // SceneGraph_addComponent(graph, buildingId, _componentIdMap.MeshRendererComponentId,
+    //     &(MeshRendererComponent) {
+    //         .material = PiecePatcher_getMaterial(index),
+    //         .mesh = PiecePatcher_getMesh(index),
+    //     });
+    // SceneGraph_setLocalRotation(graph, buildingId, (Vector3){0.0f, -90.0f * PiecePatcher_getRotation(index), 0.0f});
+    // for (int i=0;i < 3;i++)
+    // {
+    //     int compatibleCount = PiecePatcher_getCompatibleMeshCount(index, 1, 0, 0);
+    //     if (compatibleCount == 0) {
+            
+    //         return chunkId;
+    //     }
+    //     int indices[2];
+    //     for (int z=0;z<2;z++)
+    //     {
+    //         int select = GetRandomValue(0, compatibleCount - 1);
+    //         int compatibleIndex = PiecePatcher_getCompatibleMeshByIndex(index, 0, 0, z + 1, select);
+    //         char name[64];
+    //         Mesh *mesh = PiecePatcher_getMesh(compatibleIndex);
+    //         snprintf(name, sizeof(name), "C:%s-%d", mesh->name, compatibleIndex);
+
+    //         SceneObjectId element = SceneGraph_createObject(graph, name);
+    //         SceneGraph_addComponent(graph, element, _componentIdMap.MeshRendererComponentId,
+    //             &(MeshRendererComponent) {
+    //                 .material = PiecePatcher_getMaterial(compatibleIndex),
+    //                 .mesh = mesh,
+    //             });
+    //         SceneGraph_setParent(graph, element, chunkId);
+    //         SceneGraph_setLocalPosition(graph, element, (Vector3){0.0f, 0.0f, 1.0f * (i + 1)});
+    //         SceneGraph_setLocalRotation(graph, element, (Vector3){0.0f, -90.0f * PiecePatcher_getRotation(compatibleIndex), 0.0f});
+    //         index = indices[z] = compatibleIndex;
+    //     }
+
+
+    //     index = indices[0];
+    // }
 
     return chunkId;
 }

@@ -51,13 +51,13 @@ int game_init(RuntimeContext *runtimeContext)
         });
     SceneGraph_setLocalRotation(_scene, cameraId, (Vector3){15.0f, 170.0f, 0.0f});
 
-    SceneObjectId playerObjectId = SceneGraph_createObject(_scene, "Cube");
-    SceneGraph_addComponent(_scene, playerObjectId, _componentIdMap.PrimitiveRendererComponentId,
-        &(PrimitiveRendererComponent) {
-            .primitiveType = PRIMITIVE_TYPE_CUBE,
-            .color = (Color){255, 0, 0, 255},
-            .size = (Vector3){1.0f, 1.0f, 1.0f},
-        });
+    // SceneObjectId playerObjectId = SceneGraph_createObject(_scene, "Cube");
+    // SceneGraph_addComponent(_scene, playerObjectId, _componentIdMap.PrimitiveRendererComponentId,
+    //     &(PrimitiveRendererComponent) {
+    //         .primitiveType = PRIMITIVE_TYPE_CUBE,
+    //         .color = (Color){255, 0, 0, 255},
+    //         .size = (Vector3){1.0f, 1.0f, 1.0f},
+    //     });
 
     SceneObjectId systemsId = SceneGraph_createObject(_scene, "Systems");
     SceneGraph_addComponent(_scene, systemsId, _componentIdMap.ChunkSystemComponentId,
@@ -65,11 +65,11 @@ int game_init(RuntimeContext *runtimeContext)
             .chunkLength = 4,
             .cameraComponentId = cameraComponentId,
         });
-    SceneGraph_addComponent(_scene, systemsId, _componentIdMap.GameplaySystemComponentId,
-        &(GameplaySystemComponent) {
-            .playerObjectId = playerObjectId,
-            .cameraComponentId = cameraComponentId,
-        });
+    // SceneGraph_addComponent(_scene, systemsId, _componentIdMap.GameplaySystemComponentId,
+    //     &(GameplaySystemComponent) {
+    //         .playerObjectId = playerObjectId,
+    //         .cameraComponentId = cameraComponentId,
+    //     });
 
     return 1;
 }

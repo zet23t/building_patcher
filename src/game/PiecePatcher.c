@@ -5,7 +5,7 @@
 #include <memory.h>
 #include <rlgl.h>
 #include "shared/util/graphics.h"
-
+#include "PiecePatcher.h"
 // The idea is the following:
 // Each mesh is a building piece that can be rotated and placed in a grid of 1x1x1 cubes.
 // Two pieces can be stitched together if their border edges match.
@@ -46,6 +46,11 @@ typedef struct OpenEdgeMesh
     uint8_t cubeCornerSet;
     uint8_t rotation;
     int nextRotationIndex;
+    int index;
+    int marker;
+    int compatible;
+    int compatibleCount;
+    int compatibleOrderId;
 } OpenEdgeMesh;
 
 static OpenEdgeMesh *_openEdgeMeshes;
@@ -69,6 +74,128 @@ static int *_verticeMergeMap;
 static int _verticeMergeMapCapacity;
 static int *_verticeTriangleCounter;
 static int _verticeTriangleCounterCapacity;
+
+static int OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int offsetX, int offsetY, int offsetZ);
+
+Mesh *PiecePatcher_getMesh(int index)
+{
+    return _openEdgeMeshes[index].mesh;
+}
+
+Material *PiecePatcher_getMaterial(int index)
+{
+    return &_buildingPieces.materials[1];
+}
+
+int PiecePatcher_getRotation(int index)
+{
+    return _openEdgeMeshes[index].rotation;
+}
+
+static int PiecePatcher_determineCompatibility(int i, PlacedPiece *pieces, int pieceCount, int validFlagMask)
+{
+    int marker = (int) ((void*)pieces) ^ pieceCount;
+    if (_openEdgeMeshes[i].marker != marker)
+    {
+        int compatible = 0;
+        int index = 0;
+        int compatibleCount = 0;
+        while (index < pieceCount)
+        {
+            PlacedPiece *piece = &pieces[index];
+            int isCompatible = (OpenEdgeMesh_isMatch(&_openEdgeMeshes[i], &_openEdgeMeshes[piece->pieceIndex], piece->offsetX, piece->offsetY, piece->offsetZ) & validFlagMask);
+            if (isCompatible)
+            {
+                compatibleCount++;
+            }
+            compatible = compatible | isCompatible;
+            index++;
+        }
+        _openEdgeMeshes[i].compatible = compatible;
+        _openEdgeMeshes[i].marker = marker;
+        _openEdgeMeshes[i].compatibleCount = compatibleCount;
+        _openEdgeMeshes[i].compatibleOrderId = -1;
+    }
+    return _openEdgeMeshes[i].compatible;
+}
+
+int PiecePatcher_getCompatibleMeshCountEx(PlacedPiece *pieces, int pieceCount, int validFlagMask)
+{
+    int result = 0;
+    PlacedPiece *pieceList[256];
+
+    for (int i = 0; i < _openEdgeMeshCount; i++)
+    {
+        if (PiecePatcher_determineCompatibility(i, pieces, pieceCount, validFlagMask))
+        {
+            result++;
+        }
+    }
+    printf("Compatible count %d\n", result);
+    // for (int i=0;i<pieceCount;i++)
+    // {
+    //     printf(" Piece %d %d %d %d\n", pieces[i].pieceIndex, pieces[i].offsetX, pieces[i].offsetY, pieces[i].offsetZ);
+    // }
+    return result;
+}
+
+int PiecePatcher_getCompatibleMeshByIndexEx(PlacedPiece *pieces, int pieceCount, int validFlagMask, int compatibleIndex)
+{
+    for (int i = 0; i < _openEdgeMeshCount; i++)
+    {
+        if (PiecePatcher_determineCompatibility(i, pieces, pieceCount, validFlagMask))
+        {
+            if (compatibleIndex == 0)
+            {
+                return i;
+            }
+            compatibleIndex--;
+        }
+    }
+
+    return -1;
+}
+
+int PiecePatcher_getCompatibleMeshCount(int index, int offsetX, int offsetY, int offsetZ)
+{
+    int marker = index << 11 ^ (offsetX << 8) ^ (offsetY << 4) ^ offsetZ;
+    int result = 0;
+    for (int i = 0; i < _openEdgeMeshCount; i++)
+    {
+        if (_openEdgeMeshes[i].marker != marker)
+        {
+            _openEdgeMeshes[i].compatible = OpenEdgeMesh_isMatch(&_openEdgeMeshes[index], &_openEdgeMeshes[i], offsetX, offsetY, offsetZ);
+            _openEdgeMeshes[i].marker = marker;
+        }
+        if (_openEdgeMeshes[i].compatible)
+        {
+            result++;
+        }
+    }
+    return result;
+}
+
+int PiecePatcher_getCompatibleMeshByIndex(int index, int offsetX, int offsetY, int offsetZ, int compatibleIndex)
+{
+    int marker = index << 11 ^ (offsetX << 8) ^ (offsetY << 4) ^ offsetZ;
+    for (int i = 0; i < _openEdgeMeshCount; i++)
+    {
+        if (_openEdgeMeshes[i].marker != marker)
+        {
+            _openEdgeMeshes[i].compatible = OpenEdgeMesh_isMatch(&_openEdgeMeshes[index], &_openEdgeMeshes[i], offsetX, offsetY, offsetZ);
+            _openEdgeMeshes[i].marker = marker;
+        }
+        if (_openEdgeMeshes[i].compatible)
+        {
+            if (compatibleIndex == 0)
+            {
+                return i;
+            }
+            compatibleIndex--;
+        }
+    }
+    return -1;
+}
 
 
 static int getCornerIndex(Vector3 corner)
@@ -400,8 +527,13 @@ static bool OpenMeshEdge_allEdgePointsOnLineSegment(OpenEdgeMesh *a, int startIn
     return true;
 }
 
-static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int offsetX, int offsetY, int offsetZ)
+static int OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int offsetX, int offsetY, int offsetZ)
 {
+    int offsetDist = offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ;
+    if (offsetDist > 1)
+    {
+        return MESH_TILE_MATCH_DISJUNCT;
+    }
     int matchCount = 0;
     // int cornersToMatchMask = mesh->cubeCornerSet & OpenEdgeMesh_mapCornerBitSet(other->cubeCornerSet, offsetX, offsetY, offsetZ);
     
@@ -409,8 +541,8 @@ static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int of
     // OpenEdgeMesh_drawCornerBitset(other->cubeCornerSet, (Vector3){offsetX, offsetY, offsetZ}, 0.075f, BLUE);
     // OpenEdgeMesh_drawCornerBitset(cornersToMatchMask, (Vector3){0, 0, 0}, 0.125f, YELLOW);
 
-
     // check if corner normals are opposing
+    int cornerMatchCount = 0;
     for (int i=0;i<8;i++)
     {
         Vector3 corner = _cubeCorners[i];
@@ -433,7 +565,8 @@ static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int of
         {
             MeshEdge edge = other->openEdgeList[j];
 
-            if (Vector3DistanceSqr(Vector3Add(edge.p1, (Vector3){offsetX, offsetY, offsetZ}), corner) < 0.0001f || Vector3DistanceSqr(Vector3Add(edge.p2, (Vector3){offsetX, offsetY, offsetZ}), corner) < 0.0001f)
+            if (Vector3DistanceSqr(Vector3Add(edge.p1, (Vector3){offsetX, offsetY, offsetZ}), corner) < 0.0001f || 
+                Vector3DistanceSqr(Vector3Add(edge.p2, (Vector3){offsetX, offsetY, offsetZ}), corner) < 0.0001f)
             {
                 normalB[normalBCount++] = edge.triangleNormal;
             }
@@ -445,7 +578,8 @@ static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int of
             {
                 if (Vector3DotProduct(normalA[j], normalB[k]) < -0.5f)
                 {
-                    return false;
+                    // printf("Corner %d mismatch %d %d\n", i, j, k);
+                    return MESH_TILE_MATCH_MISMATCH;
                 }
             }
         }
@@ -467,7 +601,10 @@ static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int of
             MeshEdge otherEdge = other->openEdgeList[j];
             if (otherEdge.startPointMarker2 == 0 || Vector3DistanceSqr(edge.p1, Vector3Add(otherEdge.p2, offset)) > 0.0001f)
                 continue;
+            cornerMatchCount += 1;
             Vector3 startB = Vector3Add(otherEdge.p2, offset);
+
+            DrawCube(startA, 0.01f, 0.01f, 0.01f, RED);
             
             // having found a pair, we can now start comparing:
             // What now follows is not insanity but a search for the end points of both edge loops
@@ -495,7 +632,7 @@ static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int of
                         if (!OpenMeshEdge_allEdgePointsOnLineSegment(mesh, i, indexL, -1, other, j, indexK, 1, offset, 0) ||
                             !OpenMeshEdge_allEdgePointsOnLineSegment(other, j, indexK, 1, mesh, i, indexL, -1, Vector3Negate(offset), 0))
                         {
-                            return false;
+                            return MESH_TILE_MATCH_MISMATCH;
                         }
                         matchCount++;
                     }
@@ -506,7 +643,7 @@ static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int of
                         
                         // GraphicsDrawArrow(_camera, startA, endA, 0.01f, RED);
                         // GraphicsDrawArrow(_camera, startB, endB, 0.01f, BLUE);
-                        return false;
+                        return MESH_TILE_MATCH_MISMATCH;
                     }
                     break;
                 }
@@ -515,7 +652,24 @@ static bool OpenEdgeMesh_isMatch(OpenEdgeMesh *mesh, OpenEdgeMesh *other, int of
         }
     }
 
-    return matchCount > 0;
+    if (matchCount > 0)
+    {
+        return MESH_TILE_MATCH_COMPATIBLE;
+    } 
+
+    if (cornerMatchCount == 0)
+    {
+        return offsetDist == 0 ? MESH_TILE_MATCH_CONGRUENTLY_DISJUNCT : MESH_TILE_MATCH_DISJUNCT;
+    }
+
+    if (cornerMatchCount > 1)
+    {
+        return MESH_TILE_MATCH_MISMATCH;
+    }
+
+    // printf("Corner match count %d\n", cornerMatchCount);
+
+    return offsetDist > 1 ? MESH_TILE_MATCH_PARTIALLY_CONGRUENTLY_DISJUNCT : MESH_TILE_MATCH_PARTIALLY_DISJUNCT;
 }
 
 static int GetMappedVertexIndex(int index)
@@ -822,6 +976,10 @@ static void OpenEdgeMesh_drawDebug(Camera camera, OpenEdgeMesh *openEdgeMesh)
         {
             DrawCubeWires(a, 0.1f, 0.1f, 0.1f, WHITE);
         }
+        if (edge.startPointMarker2)
+        {
+            DrawCubeWires(b, 0.075f, 0.075f, 0.075f, LIGHTGRAY);
+        }
         // DrawLine3D(a, b, color);
         // DrawLine3D(center, Vector3Add(center, Vector3Scale(edge.triangleNormal, 0.1f)), RED);
         // for (int k=0;k<6;k++)
@@ -840,8 +998,9 @@ static void OpenEdgeMesh_drawDebug(Camera camera, OpenEdgeMesh *openEdgeMesh)
     }
 }
 
-static void TestMeshes(Vector3 position, OpenEdgeMesh *meshA, OpenEdgeMesh *meshB, int offsetX, int offsetY, int offsetZ, int outlines, int expectedResult)
+static int TestMeshes(Vector3 position, OpenEdgeMesh *meshA, OpenEdgeMesh *meshB, int offsetX, int offsetY, int offsetZ, int outlines, int expectedResult)
 {
+    int returnCode = 0;
     rlPushMatrix();
     rlTranslatef(position.x, position.y, position.z);
 
@@ -852,13 +1011,15 @@ static void TestMeshes(Vector3 position, OpenEdgeMesh *meshA, OpenEdgeMesh *mesh
 
     Material mat = _buildingPieces.materials[1];
     int result = OpenEdgeMesh_isMatch(meshA, meshB, offsetX, offsetY, offsetZ);
-    if (!result)
+    if (result != expectedResult)
     {
-        mat.maps[MATERIAL_MAP_DIFFUSE].color = (Color){0, 0, 255, 128};
+        int fade = (int)((sinf(GetTime() * 4.0f) * .125f + .875f) * 255.0f);
+        mat.maps[MATERIAL_MAP_DIFFUSE].color = (Color){255, fade, fade, 255};
+        returnCode = 1;
     }
-    if (result != expectedResult && expectedResult != -1)
+    else if (result == MESH_TILE_MATCH_MISMATCH)
     {
-        mat.maps[MATERIAL_MAP_DIFFUSE].color = (Color){255, 0, 0, 128};
+        mat.maps[MATERIAL_MAP_DIFFUSE].color = (Color){255, 255, 255, 64};
     }
 
 
@@ -873,8 +1034,7 @@ static void TestMeshes(Vector3 position, OpenEdgeMesh *meshA, OpenEdgeMesh *mesh
     rlDisableDepthTest();
 
     rlPushMatrix();
-    OpenEdgeMesh_isMatch(meshA, meshB, offsetX, offsetY, offsetZ);
-
+    
     if (outlines)
     {
         if (outlines & 1) OpenEdgeMesh_drawDebug(_camera, meshA);
@@ -887,11 +1047,23 @@ static void TestMeshes(Vector3 position, OpenEdgeMesh *meshA, OpenEdgeMesh *mesh
     rlEnableDepthTest();
 
     rlPopMatrix();
+    return returnCode;
+}
+
+void PlacedPieces_shift(PlacedPiece *pieces, int pieceCount, int dx, int dy, int dz)
+{
+    for (int i = 0; i < pieceCount; i++)
+    {
+        pieces[i].offsetX += dx;
+        pieces[i].offsetY += dy;
+        pieces[i].offsetZ += dz;
+    }
 }
 
 void PiecePatcherDrawDebug()
 {
     static float zoom = 1.0f;
+    int debug = 0;
 
     float wheel = GetMouseWheelMove();
     if (wheel != 0)
@@ -921,6 +1093,19 @@ void PiecePatcherDrawDebug()
         .up = (Vector3){0.0f, 1.0f, 0.0f},
         .projection = CAMERA_ORTHOGRAPHIC};
     BeginMode3D(camera);
+    static float rotate = 0.0f;
+    if (IsKeyDown(KEY_A))
+    {
+        rotate -= GetFrameTime() * 100.0f;
+    }
+    if (IsKeyDown(KEY_D))
+    {
+        rotate += GetFrameTime() * 100.0f;
+    }
+    rlPushMatrix();
+
+    rlRotatef(rotate, 0, 1, 0);
+    
 
     Matrix identity = MatrixIdentity();
     // DrawCubeWires((Vector3){0, 0.5f, 0}, 1.0f, 1.0f, 1.0f, RED);
@@ -928,7 +1113,7 @@ void PiecePatcherDrawDebug()
     mat.maps[MATERIAL_MAP_DIFFUSE].color = (Color){255, 255, 255, 255};
     _camera = camera;
 
-    static int mode = 1;
+    static int mode = 4;
     static int outlines = 0;
     if (IsKeyPressed(KEY_O))
     {
@@ -936,14 +1121,15 @@ void PiecePatcherDrawDebug()
     }
     if (IsKeyPressed(KEY_M))
     {
-        mode = (mode + 1) % 2;
+        debug = 1;
+        mode = (mode + 1) % 5;
     }
-    if (mode == 0)
+    switch (mode)
     {
-
+        case 0:
+        {
         static int testIndex = 0;
         static int ox = 1, oy = 0, oz = 0;
-        int debug = 0;
         if (IsKeyPressed(KEY_ONE))
         {
             ox = 0;
@@ -999,11 +1185,11 @@ void PiecePatcherDrawDebug()
         for (int i = 0; i < _openEdgeMeshCount; i++)
         {
             OpenEdgeMesh *meshB = &_openEdgeMeshes[i];
-            if (OpenEdgeMesh_isMatch(meshA, meshB, ox, oy, oz))
+            if (OpenEdgeMesh_isMatch(meshA, meshB, ox, oy, oz) == MESH_TILE_MATCH_COMPATIBLE)
             {
                 matches++;
                 if (debug) printf("  Match %s (%d)\n", meshB->mesh->name, i);
-                TestMeshes((Vector3){x * 2.5f - 4.0f, 0.0f, z++ * 2.5f - 4.0f}, meshA, meshB, ox, oy, oz, outlines, -1);
+                TestMeshes((Vector3){x * 2.5f - 4.0f, 0.0f, z++ * 2.5f - 4.0f}, meshA, meshB, ox, oy, oz, outlines, MESH_TILE_MATCH_COMPATIBLE);
                 if (z == 4)
                 {
                     z = 0;
@@ -1016,34 +1202,40 @@ void PiecePatcherDrawDebug()
             DrawMesh(*meshA->mesh, mat, identity);
         }
     }
-    else
+    break;
+    case 1:
     {
         int testcases[] = {
-            68, 70, 1, 0, 0, 0,
-            0, 0, 0, -1, 0, 1,
-            44, 32, 0, 0, 0, 1,
-            76, 60, 0, 1, 0, 0,
-            0, 56, 0, 0, -1, 1,
-            0, 3, 0, 0, 1, 0,
-            0, 3, 0, 0, 0, 1,
-            0, 1, 0, 0, 0, 1,
-            59, 57, 0, 0, 0, 1,
-            56, 55, 0, 0, 0, 0,
-            56, 55, 0, 1, 0, 0,
-            0, 55, 0, 1, 0, 1,
-            24, 28, 0, 1, 0, 1,
-            28, 60, 0, 0, 0, 0,
-            28, 50, 0, 0, 0, 1,
-            71, 55, 0, 1, 0, 1,
-            55, 55, 1, 0, 0, 0,
-            88, 96, 1, 0, 0, 1,
-            84, 96, 1, 0, 0, 0,
-            152, 0, 0, 0, 1, 0,
-            152, 132, 1, 0, 0, 1,
-            136, 104, 1, 0, 0, 0,
-            120, 119, 1, 0, 0, 1,
-            119, 115, 0, 0, 1, 1,
-            164, 87, 1, 0, 0, 0,
+            // 91, 87, -1, 0, 0, MESH_TILE_MATCH_COMPATIBLE,
+            // 84, 70, 0, -1, 0, MESH_TILE_MATCH_MISMATCH,
+            95, 87, 0, 0, 1, MESH_TILE_MATCH_COMPATIBLE,
+            159, 68, 0, -1, 0, MESH_TILE_MATCH_COMPATIBLE,
+            68, 159, 0, 1, 0, MESH_TILE_MATCH_COMPATIBLE,
+            // 68, 70, 1, 0, 0, MESH_TILE_MATCH_MISMATCH,
+            // 0, 0, 0, -1, 0, MESH_TILE_MATCH_COMPATIBLE,
+            // 44, 32, 0, 0, 0, MESH_TILE_MATCH_COMPATIBLE,
+            // 76, 60, 0, 1, 0, MESH_TILE_MATCH_COMPATIBLE,
+            // 0, 56, 0, 0, -1, MESH_TILE_MATCH_COMPATIBLE,
+            // 0, 3, 0, 0, 1, MESH_TILE_MATCH_MISMATCH,
+            // 0, 3, 0, 0, 0, MESH_TILE_MATCH_COMPATIBLE,
+            // 0, 1, 0, 0, 0, MESH_TILE_MATCH_COMPATIBLE,
+            // 59, 57, 0, 0, 0, MESH_TILE_MATCH_COMPATIBLE,
+            // 56, 55, 0, 0, 0, MESH_TILE_MATCH_MISMATCH,
+            // 56, 55, 0, 1, 0, MESH_TILE_MATCH_MISMATCH,
+            // 0, 55, 0, 1, 0, MESH_TILE_MATCH_COMPATIBLE,
+            // 24, 28, 0, 1, 0, MESH_TILE_MATCH_COMPATIBLE,
+            // 28, 60, 0, 0, 0, MESH_TILE_MATCH_MISMATCH,
+            // 28, 50, 0, 0, 0, MESH_TILE_MATCH_COMPATIBLE,
+            // 71, 55, 0, 1, 0, MESH_TILE_MATCH_COMPATIBLE,
+            // 55, 55, 1, 0, 0, MESH_TILE_MATCH_MISMATCH, // <- broken, not sure if valid, ignore for now
+            // 88, 96, 1, 0, 0, MESH_TILE_MATCH_COMPATIBLE,
+            // 84, 96, 1, 0, 0, MESH_TILE_MATCH_MISMATCH,
+            // 152, 0, 0, 0, 1, MESH_TILE_MATCH_DISJUNCT,
+            // 152, 132, 1, 0, 0, MESH_TILE_MATCH_COMPATIBLE,
+            // 136, 104, 1, 0, 0, MESH_TILE_MATCH_DISJUNCT,
+            // 120, 119, 1, 0, 0, MESH_TILE_MATCH_COMPATIBLE,
+            // 119, 115, 0, 0, 1, MESH_TILE_MATCH_COMPATIBLE,
+            // 164, 87, 1, 0, 0, MESH_TILE_MATCH_DISJUNCT,
         };
 
         float width = fminf(sizeof(testcases) / sizeof(int) / 6 - 1, 5) * 2.5f;
@@ -1052,10 +1244,296 @@ void PiecePatcherDrawDebug()
         for (int i=0;i<sizeof(testcases)/sizeof(int);i+=6)
         {
             int n = i / 6;
-            TestMeshes((Vector3){(n % 6) * 2.5f - width * .5f, 0.0f, (n / 6) * 2.5f - height * .125f}, &_openEdgeMeshes[testcases[i]], &_openEdgeMeshes[testcases[i+1]], testcases[i+2], testcases[i+3], testcases[i+4], outlines, testcases[i+5]);
+            int code = TestMeshes((Vector3){(n % 6) * 2.5f - width * .5f, 0.0f, (n / 6) * 2.5f - height * .125f}, &_openEdgeMeshes[testcases[i]], &_openEdgeMeshes[testcases[i+1]], testcases[i+2], testcases[i+3], testcases[i+4], outlines, testcases[i+5]);
+            if (code && debug)
+            {
+                printf("Test %d failed\n", n);
+            }
         }
         rlEnableBackfaceCulling();
     }
+    break;
+    case 2:
+    {
+            
+        PlacedPiece placedPieces[4*4*4*4];
+        int placedPieceCount = 0;
+        
+        #define ADD_PIECE(x, y, z, index) { \
+            placedPieces[placedPieceCount++] = (PlacedPiece){ \
+                .offsetX = x, \
+                .offsetY = y, \
+                .offsetZ = z, \
+                .pieceIndex = index, \
+            }; \
+            DrawCubeWires((Vector3){x, y + .5f, z}, 1.0f, 1.0f, 1.0f, GREEN); \
+        }
+        #define SHIFT(dx, dy, dz) for (int _i = 0; _i < placedPieceCount; _i++) { \
+            placedPieces[_i].offsetX -= dx; \
+            placedPieces[_i].offsetY -= dy; \
+            placedPieces[_i].offsetZ -= dz; \
+        }
+        #define ADD_RANDOM_PIECE(x, y, z) \
+            { \
+                SHIFT(x, y, z);\
+                int _count = PiecePatcher_getCompatibleMeshCountEx(placedPieces, placedPieceCount, MESH_TILE_MATCH_BUILD_MASK); \
+                if (_count > 0) { \
+                    int _select = GetRandomValue(0, _count - 1); \
+                    int _index = PiecePatcher_getCompatibleMeshByIndexEx(placedPieces, placedPieceCount, MESH_TILE_MATCH_BUILD_MASK, _select); \
+                    SHIFT(-x, -y, -z);\
+                    ADD_PIECE(x, y, z, _index); \
+                } \
+                else {\
+                    SHIFT(-x, -y, -z);\
+                    DrawCubeWires((Vector3){x, y + .5f, z}, 1.0f, 1.0f, 1.0f, RED); \
+                }\
+            }
+        #define ADD_RANDOM_PIECE_AT(x,y,z) \
+            SHIFT(x, y, z); ADD_RANDOM_PIECE(); SHIFT(-x, -y, -z);
+
+
+        static int seed = 122;
+        SetRandomSeed(seed);
+
+        if (IsKeyPressed(KEY_R))
+        {
+            seed++;
+        }
+        if (IsKeyPressed(KEY_T))
+        {
+            seed--;
+        }
+
+        
+        ADD_PIECE(0, 0, 0, 1);
+        ADD_RANDOM_PIECE(0, 0, 0);
+        ADD_RANDOM_PIECE(0, 0, 0);
+        ADD_RANDOM_PIECE(0, 0, 0);
+        ADD_RANDOM_PIECE(0, 1, 0);
+        // ADD_RANDOM_PIECE(1, 0, 0);
+        // ADD_RANDOM_PIECE(0, 1, 0);
+        // ADD_RANDOM_PIECE(0, 0, 1);
+        // ADD_RANDOM_PIECE(1, 1, 0);
+        // ADD_RANDOM_PIECE(1, 0, 1);
+        // ADD_RANDOM_PIECE(0, 0, 0);
+        // ADD_RANDOM_PIECE(0, 1, 0);
+        // ADD_RANDOM_PIECE(1, 0, 0);
+        for (int i = 0; i < placedPieceCount; i++)
+        {
+            PlacedPiece piece = placedPieces[i];
+            OpenEdgeMesh *mesh = &_openEdgeMeshes[piece.pieceIndex];
+            Matrix m = MatrixIdentity();
+            m = MatrixMultiply(m, MatrixRotateY(PI * 0.5f * -mesh->rotation));
+            m = MatrixMultiply(m,MatrixTranslate(piece.offsetX, piece.offsetY, piece.offsetZ));
+            DrawMesh(*mesh->mesh, mat, m);
+        }
+
+        #undef ADD_PIECE
+        #undef SHIFT
+        #undef ADD_RANDOM_PIECE
+        #undef ADD_RANDOM_PIECE_AT
+    }
+    break;
+    case 3:
+    {
+        int tiles[] = {
+            0, 0, 0, 0,
+            1, 0, 0, 0,
+            2, 0, 0, 0,
+            3, 0, 0, 0,
+        };
+        int tileCount = sizeof(tiles) / sizeof(int) / 4;
+        for (int i = 0; i < tileCount; i++)
+        {
+            int index = tiles[i * 4];
+            int x = tiles[i * 4 + 1];
+            int y = tiles[i * 4 + 2];
+            int z = tiles[i * 4 + 3];
+            OpenEdgeMesh *mesh = &_openEdgeMeshes[index];
+            Color color = WHITE;
+            for (int j = 0; j < i; j++)
+            {
+                int ox = tiles[j * 4 + 1];
+                int oy = tiles[j * 4 + 2];
+                int oz = tiles[j * 4 + 3];
+                if (OpenEdgeMesh_isMatch(mesh, &_openEdgeMeshes[tiles[j * 4]], ox - x, oy - y, oz - z) == MESH_TILE_MATCH_MISMATCH)
+                {
+                    color = RED;
+                    break;
+                }
+            }
+
+            Matrix m = MatrixIdentity();
+            m = MatrixMultiply(m, MatrixRotateY(PI * 0.5f * -mesh->rotation));
+            m = MatrixMultiply(m, MatrixTranslate(x, y, z));
+
+            mat.maps[MATERIAL_MAP_DIFFUSE].color = color;
+            DrawMesh(*mesh->mesh, mat, m);
+        }
+        mat.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
+    }
+    break;
+    case 4:
+    {
+        static int cursor[3] = {0, 0, 0};
+        static PlacedPiece placedPieces[512];
+        static int placedPieceCount = 0;
+
+        DrawCubeWires((Vector3){cursor[0], cursor[1] + .5f, cursor[2]}, 1.0f, 1.0f, 1.0f, GREEN);
+        if (IsKeyPressed(KEY_UP))
+        {
+            cursor[IsKeyDown(KEY_LEFT_SHIFT) ? 1 : 2]++;
+            printf("Cursor %d %d %d\n", cursor[0], cursor[1], cursor[2]);
+        }
+        if (IsKeyPressed(KEY_DOWN))
+        {
+            cursor[IsKeyDown(KEY_LEFT_SHIFT) ? 1 : 2]--;
+            printf("Cursor %d %d %d\n", cursor[0], cursor[1], cursor[2]);
+
+        }
+        if (IsKeyPressed(KEY_LEFT))
+        {
+            cursor[0]++;
+            printf("Cursor %d %d %d\n", cursor[0], cursor[1], cursor[2]);
+
+        }
+        if (IsKeyPressed(KEY_RIGHT))
+        {
+            cursor[0]--;
+            printf("Cursor %d %d %d\n", cursor[0], cursor[1], cursor[2]);
+        }
+        if (IsKeyPressed(KEY_F1))
+        {
+            // save
+            SaveFileData("placedPieces.bin", placedPieces, placedPieceCount * sizeof(PlacedPiece));
+        }
+        if (IsKeyPressed(KEY_F2))
+        {
+            // load
+            int dataSize;
+            const char *data = LoadFileData("placedPieces.bin", &dataSize);
+            if (data)
+            {
+                placedPieceCount = dataSize / sizeof(PlacedPiece);
+                memcpy(placedPieces, data, dataSize);
+                UnloadFileData(data);
+            }
+        }
+
+        if (IsKeyPressed(KEY_DELETE))
+        {
+            for (int i= placedPieceCount - 1; i>=0;i--)
+            {
+                if (placedPieces[i].offsetX == cursor[0] && placedPieces[i].offsetY == cursor[1] && placedPieces[i].offsetZ == cursor[2])
+                {
+                    placedPieces[i] = placedPieces[--placedPieceCount];
+                    break;
+                }
+            }
+        }
+
+        if (IsKeyPressed(KEY_B) || IsKeyPressed(KEY_N))
+        {
+            int direction = IsKeyPressed(KEY_N) ? -1 : 1;
+            for (int i= placedPieceCount - 1; i>=0;i--)
+            {
+                if (placedPieces[i].offsetX == cursor[0] && placedPieces[i].offsetY == cursor[1] && placedPieces[i].offsetZ == cursor[2])
+                {
+                    PlacedPiece piece = placedPieces[i];
+                    int currentIndex = piece.pieceIndex;
+                    piece.pieceIndex = (piece.pieceIndex + direction + _openEdgeMeshCount) % _openEdgeMeshCount;
+                    placedPieces[i] = piece;
+                    break;
+                }
+            }
+        }
+
+        if (IsKeyPressed(KEY_V))
+        {
+            for (int i= placedPieceCount - 1; i>=0;i--)
+            {
+                if (placedPieces[i].offsetX == cursor[0] && placedPieces[i].offsetY == cursor[1] && placedPieces[i].offsetZ == cursor[2])
+                {
+                    // print compatible pieces of neighbors
+                    for (int j=0;j<placedPieceCount;j++)
+                    {
+                        if (j == i) continue;
+                        PlacedPiece piece = placedPieces[j];
+                        int dx = (piece.offsetX - cursor[0]);
+                        int dy = (piece.offsetY - cursor[1]);
+                        int dz = (piece.offsetZ - cursor[2]);
+                        if (dx*dx+dy*dy+dz*dz > 1) continue;
+                        int matchResult = OpenEdgeMesh_isMatch(&_openEdgeMeshes[placedPieces[i].pieceIndex], &_openEdgeMeshes[piece.pieceIndex], dx, dy, dz);
+                        printf("Neighbor %d-%d (%d %d %d): %d\n", placedPieces[i].pieceIndex, piece.pieceIndex, dx, dy, dz, matchResult);
+                    }
+                    break;
+                }
+            }
+        }
+
+        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_BACKSPACE))
+        {
+            int direction = IsKeyPressed(KEY_BACKSPACE) ? -1 : 1;
+            PlacedPieces_shift(placedPieces, placedPieceCount, -cursor[0], -cursor[1], -cursor[2]);
+            int placedPieceIndex = -1;
+            for (int i=placedPieceCount-1;i>=0 && !IsKeyDown(KEY_LEFT_SHIFT);i--)
+            {
+                if (placedPieces[i].offsetX == 0 && placedPieces[i].offsetY == 0 && placedPieces[i].offsetZ == 0)
+                {
+                    PlacedPiece piece = placedPieces[i];
+                    placedPieceIndex = placedPieceCount;
+                    placedPieces[i] = placedPieces[--placedPieceCount];
+                    int currentIndex = placedPieces[i].pieceIndex;
+                    int count = PiecePatcher_getCompatibleMeshCountEx(placedPieces, placedPieceCount, MESH_TILE_MATCH_BUILD_MASK);
+
+                    for (int j=0;j<count;j++)
+                    {
+                        int index = PiecePatcher_getCompatibleMeshByIndexEx(placedPieces, placedPieceCount, MESH_TILE_MATCH_BUILD_MASK, j);
+
+                        if (index == currentIndex)
+                        {
+                            placedPieces[i].pieceIndex = PiecePatcher_getCompatibleMeshByIndexEx(placedPieces, placedPieceCount, MESH_TILE_MATCH_BUILD_MASK, (j + direction + count) % count);
+                            printf("Replacing piece %d: %d\n", i, placedPieces[i].pieceIndex);
+                            placedPieceCount++;
+                            break;
+                        }
+                    }
+
+                    break;
+                }
+            }
+
+            if (placedPieceIndex == -1)
+            {
+                int newIndex = PiecePatcher_getCompatibleMeshByIndexEx(placedPieces, placedPieceCount, MESH_TILE_MATCH_BUILD_MASK, 0);
+                printf("Placing piece %d\n", newIndex);
+                if (newIndex >= 0)
+                {
+                    placedPieces[placedPieceCount++] = (PlacedPiece){
+                        .offsetX = 0,
+                        .offsetY = 0,
+                        .offsetZ = 0,
+                        .pieceIndex = newIndex,
+                    };
+                }
+            }
+            
+            PlacedPieces_shift(placedPieces, placedPieceCount, cursor[0], cursor[1], cursor[2]);
+        }
+
+        for (int i=0;i<placedPieceCount;i++)
+        {
+            PlacedPiece piece = placedPieces[i];
+            OpenEdgeMesh *mesh = &_openEdgeMeshes[piece.pieceIndex];
+            Matrix m = MatrixIdentity();
+            m = MatrixMultiply(m, MatrixRotateY(PI * 0.5f * -mesh->rotation));
+            m = MatrixMultiply(m, MatrixTranslate(piece.offsetX, piece.offsetY, piece.offsetZ));
+            DrawMesh(*mesh->mesh, mat, m);
+        }
+    }
+    break;
+    }
+    rlPopMatrix();
 
     // rlPushMatrix();
     // for (int i = 0; i < limit; i+=stride)
@@ -1127,4 +1605,6 @@ void PiecePatcherDrawDebug()
     // rlEnableDepthTest();
 
     EndMode3D();
+
+
 }
