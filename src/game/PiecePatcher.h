@@ -28,6 +28,7 @@ Material *PiecePatcher_getMaterial(int index);
 int PiecePatcher_getRotation(int index);
 Mesh *PiecePatcher_getMesh(int index);
 
+int PiecePatcher_clearCompatibleFlags();
 int PiecePatcher_getCompatibleMeshCountEx(PlacedPiece *pieces, int pieceCount, int validFlagMask);
 int PiecePatcher_getCompatibleMeshByIndexEx(PlacedPiece *pieces, int pieceCount, int validFlagMask, int compatibleIndex);
 int PiecePatcher_getCompatibleMeshCount(int index, int offsetX, int offsetY, int offsetZ);

@@ -95,6 +95,10 @@ int PiecePatcher_getRotation(int index)
 static int PiecePatcher_determineCompatibility(int i, PlacedPiece *pieces, int pieceCount, int validFlagMask)
 {
     int marker = (int) ((void*)pieces) ^ pieceCount;
+    for (int i = 0; i < pieceCount; i++)
+    {
+        marker ^= (pieces[i].pieceIndex << 11) ^ (pieces[i].offsetX << 8) ^ (pieces[i].offsetY << 4) ^ pieces[i].offsetZ;
+    }
     if (_openEdgeMeshes[i].marker != marker)
     {
         int compatible = 0;
@@ -119,10 +123,32 @@ static int PiecePatcher_determineCompatibility(int i, PlacedPiece *pieces, int p
     return _openEdgeMeshes[i].compatible;
 }
 
+int OpenEdgeMesh_compareByCompatibleCount(const void *a, const void *b)
+{
+    OpenEdgeMesh *meshA = *(OpenEdgeMesh**)a;
+    OpenEdgeMesh *meshB = *(OpenEdgeMesh**)b;
+    if (meshA->compatibleCount == meshB->compatibleCount)
+    {
+        return meshA < meshB ? -1 : 1;
+    }
+    return meshB->compatibleCount - meshA->compatibleCount;
+}
+
+static OpenEdgeMesh **_openEdgeList = NULL;
+static int _openEdgeListCapacity = 0;
+int PiecePatcher_clearCompatibleFlags()
+{
+    for (int i = 0; i < _openEdgeMeshCount; i++)
+    {
+        _openEdgeMeshes[i].compatible = 0;
+        _openEdgeMeshes[i].compatibleCount = 0;
+        _openEdgeMeshes[i].marker = 0;
+    }
+    return 0;
+}
 int PiecePatcher_getCompatibleMeshCountEx(PlacedPiece *pieces, int pieceCount, int validFlagMask)
 {
     int result = 0;
-    PlacedPiece *pieceList[256];
 
     for (int i = 0; i < _openEdgeMeshCount; i++)
     {
@@ -131,6 +157,27 @@ int PiecePatcher_getCompatibleMeshCountEx(PlacedPiece *pieces, int pieceCount, i
             result++;
         }
     }
+    int openEdgeListCount = 0;
+    if (_openEdgeListCapacity < _openEdgeMeshCount)
+    {
+        _openEdgeListCapacity = _openEdgeMeshCount;
+        _openEdgeList = STRUCT_REALLOC(_openEdgeList, OpenEdgeMesh*, _openEdgeListCapacity);
+    }
+    for (int i = 0; i < _openEdgeMeshCount; i++)
+    {
+        if (_openEdgeMeshes[i].compatible)
+        {
+            _openEdgeList[openEdgeListCount++] = &_openEdgeMeshes[i];
+        }
+    }
+
+    qsort(_openEdgeList, openEdgeListCount, sizeof(OpenEdgeMesh*), OpenEdgeMesh_compareByCompatibleCount);
+
+    for (int i = 0; i < openEdgeListCount; i++)
+    {
+        _openEdgeList[i]->compatibleOrderId = i;
+    }
+
     printf("Compatible count %d\n", result);
     // for (int i=0;i<pieceCount;i++)
     // {
@@ -145,11 +192,10 @@ int PiecePatcher_getCompatibleMeshByIndexEx(PlacedPiece *pieces, int pieceCount,
     {
         if (PiecePatcher_determineCompatibility(i, pieces, pieceCount, validFlagMask))
         {
-            if (compatibleIndex == 0)
+            if (compatibleIndex == _openEdgeMeshes[i].compatibleOrderId)
             {
                 return i;
             }
-            compatibleIndex--;
         }
     }
 
@@ -1062,8 +1108,25 @@ void PlacedPieces_shift(PlacedPiece *pieces, int pieceCount, int dx, int dy, int
 
 void PiecePatcherDrawDebug()
 {
+    static float rotate = 0.0f;
+    if (IsKeyDown(KEY_A))
+    {
+        rotate -= GetFrameTime() * 100.0f;
+    }
+    if (IsKeyDown(KEY_D))
+    {
+        rotate += GetFrameTime() * 100.0f;
+    }
+
+    static int cursor[3] = {0, 0, 0};
+    static Vector3 cursorCamTarget = {0.0f, 0.5f, 0.0f};
+    static int mode = 4;
     static float zoom = 1.0f;
     int debug = 0;
+
+    float camTargetLerp = 2.5f * GetFrameTime();
+    cursorCamTarget.x = cursor[0] * camTargetLerp + cursorCamTarget.x * (1.0f - camTargetLerp);
+    cursorCamTarget.z = cursor[2] * camTargetLerp + cursorCamTarget.z * (1.0f - camTargetLerp);
 
     float wheel = GetMouseWheelMove();
     if (wheel != 0)
@@ -1078,12 +1141,17 @@ void PiecePatcherDrawDebug()
     int limit = _openEdgeMeshCount;
     int stride = 1;
     Vector3 camTarget = (Vector3){gap * _openEdgeMeshCount / (rows * 2.0f), 0.5f, gap * (rows / 4.0f)};
-
+    if (mode == 4) camTarget = cursorCamTarget;
     stride = 32;
     limit = stride + 1;
-    camTarget = (Vector3){0.0f, -.25f, 0.0f};
+    // camTarget = (Vector3){0.0f, -.25f, 0.0f};
 
     Vector3 camPos = (Vector3){15.0f + camTarget.x, 25.0f + camTarget.y, -20.0f + camTarget.z};
+    float rotSin = sinf(rotate * DEG2RAD);
+    float rotCos = cosf(rotate * DEG2RAD);
+    if (mode == 4) camPos = Vector3Add((Vector3){rotSin * 20.0f, 25.0f, rotCos * -20.0f}, camTarget);
+
+    // printf("Mode %d %.2f %.2f %.2f -> %.2f %.2f %.2f\n", mode, camPos.x, camPos.y, camPos.z, camTarget.x, camTarget.y, camTarget.z);
     Camera camera = (Camera){
         .far = 1000.0f,
         .near = 0.1f,
@@ -1093,18 +1161,9 @@ void PiecePatcherDrawDebug()
         .up = (Vector3){0.0f, 1.0f, 0.0f},
         .projection = CAMERA_ORTHOGRAPHIC};
     BeginMode3D(camera);
-    static float rotate = 0.0f;
-    if (IsKeyDown(KEY_A))
-    {
-        rotate -= GetFrameTime() * 100.0f;
-    }
-    if (IsKeyDown(KEY_D))
-    {
-        rotate += GetFrameTime() * 100.0f;
-    }
     rlPushMatrix();
 
-    rlRotatef(rotate, 0, 1, 0);
+    // rlRotatef(rotate, 0, 1, 0);
     
 
     Matrix identity = MatrixIdentity();
@@ -1113,7 +1172,6 @@ void PiecePatcherDrawDebug()
     mat.maps[MATERIAL_MAP_DIFFUSE].color = (Color){255, 255, 255, 255};
     _camera = camera;
 
-    static int mode = 4;
     static int outlines = 0;
     if (IsKeyPressed(KEY_O))
     {
@@ -1375,31 +1433,59 @@ void PiecePatcherDrawDebug()
     break;
     case 4:
     {
-        static int cursor[3] = {0, 0, 0};
         static PlacedPiece placedPieces[512];
         static int placedPieceCount = 0;
 
-        DrawCubeWires((Vector3){cursor[0], cursor[1] + .5f, cursor[2]}, 1.0f, 1.0f, 1.0f, GREEN);
-        if (IsKeyPressed(KEY_UP))
+        float viewDirX = sinf(rotate * DEG2RAD);
+        float viewDirZ = cosf(rotate * DEG2RAD);
+        int viewDirXIndex = fabsf(viewDirX) > fabsf(viewDirZ) ? 2 : 0;
+        int viewDirZIndex = fabsf(viewDirX) > fabsf(viewDirZ) ? 0 : 2;
+        int viewDirXInt = viewDirZ > 0 ? 1 : -1;
+        int viewDirZInt = viewDirZ > 0 ? 1 : -1;
+        if (viewDirXIndex == 2)
         {
-            cursor[IsKeyDown(KEY_LEFT_SHIFT) ? 1 : 2]++;
-            printf("Cursor %d %d %d\n", cursor[0], cursor[1], cursor[2]);
+            viewDirXInt = viewDirX > 0 ? 1 : -1;
+            viewDirZInt = viewDirX < 0 ? 1 : -1;
         }
-        if (IsKeyPressed(KEY_DOWN))
-        {
-            cursor[IsKeyDown(KEY_LEFT_SHIFT) ? 1 : 2]--;
-            printf("Cursor %d %d %d\n", cursor[0], cursor[1], cursor[2]);
 
+        DrawCubeWires((Vector3){cursor[0], cursor[1] + .5f, cursor[2]}, 1.0f, 1.0f, 1.0f, GREEN);
+        if (IsKeyDown(KEY_LEFT_SHIFT))
+        {
+
+            if (IsKeyPressed(KEY_UP))
+            {
+                cursor[1]++;
+                printf("Cursor %d %d %d\n", cursor[0], cursor[1], cursor[2]);
+            }
+            if (IsKeyPressed(KEY_DOWN))
+            {
+                cursor[1]--;
+                printf("Cursor %d %d %d\n", cursor[0], cursor[1], cursor[2]);
+
+            }
+        }
+        else
+        {
+            if (IsKeyPressed(KEY_UP))
+            {
+                cursor[viewDirZIndex]+=viewDirZInt;
+                printf("Cursor %d %d %d\n", cursor[0], cursor[1], cursor[2]);
+            }
+            if (IsKeyPressed(KEY_DOWN))
+            {
+                cursor[viewDirZIndex]-=viewDirZInt;
+                printf("Cursor %d %d %d\n", cursor[0], cursor[1], cursor[2]);
+            }
         }
         if (IsKeyPressed(KEY_LEFT))
         {
-            cursor[0]++;
+            cursor[viewDirXIndex]+=viewDirXInt;
             printf("Cursor %d %d %d\n", cursor[0], cursor[1], cursor[2]);
 
         }
         if (IsKeyPressed(KEY_RIGHT))
         {
-            cursor[0]--;
+            cursor[viewDirXIndex]-=viewDirXInt;
             printf("Cursor %d %d %d\n", cursor[0], cursor[1], cursor[2]);
         }
         if (IsKeyPressed(KEY_F1))
@@ -1483,7 +1569,8 @@ void PiecePatcherDrawDebug()
                     PlacedPiece piece = placedPieces[i];
                     placedPieceIndex = placedPieceCount;
                     placedPieces[i] = placedPieces[--placedPieceCount];
-                    int currentIndex = placedPieces[i].pieceIndex;
+                    placedPieces[placedPieceCount] = piece;
+                    int currentIndex = piece.pieceIndex;
                     int count = PiecePatcher_getCompatibleMeshCountEx(placedPieces, placedPieceCount, MESH_TILE_MATCH_BUILD_MASK);
 
                     for (int j=0;j<count;j++)
@@ -1492,8 +1579,8 @@ void PiecePatcherDrawDebug()
 
                         if (index == currentIndex)
                         {
-                            placedPieces[i].pieceIndex = PiecePatcher_getCompatibleMeshByIndexEx(placedPieces, placedPieceCount, MESH_TILE_MATCH_BUILD_MASK, (j + direction + count) % count);
-                            printf("Replacing piece %d: %d\n", i, placedPieces[i].pieceIndex);
+                            placedPieces[placedPieceCount].pieceIndex = PiecePatcher_getCompatibleMeshByIndexEx(placedPieces, placedPieceCount, MESH_TILE_MATCH_BUILD_MASK, (j + direction + count) % count);
+                            printf("Replacing piece %d: %d\n", i, placedPieces[placedPieceCount].pieceIndex);
                             placedPieceCount++;
                             break;
                         }
@@ -1505,6 +1592,7 @@ void PiecePatcherDrawDebug()
 
             if (placedPieceIndex == -1)
             {
+                PiecePatcher_getCompatibleMeshCountEx(placedPieces, placedPieceCount, MESH_TILE_MATCH_BUILD_MASK);
                 int newIndex = PiecePatcher_getCompatibleMeshByIndexEx(placedPieces, placedPieceCount, MESH_TILE_MATCH_BUILD_MASK, 0);
                 printf("Placing piece %d\n", newIndex);
                 if (newIndex >= 0)
